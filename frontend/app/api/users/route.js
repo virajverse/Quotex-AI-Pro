@@ -1,4 +1,4 @@
-import { get } from '../../../../lib/proxy';
+import { get } from '../../../lib/proxy';
 
 export async function GET(request) {
   const { search } = new URL(request.url);

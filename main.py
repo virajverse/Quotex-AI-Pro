@@ -8,6 +8,7 @@ from telebot import types
 from database import Database
 from admin import create_admin_blueprint
 from webhook import create_webhook_blueprint
+from analysis import generate_signal_with_chart
 
 load_dotenv()
 
@@ -67,16 +68,8 @@ def signals_cmd(message):
 
 
 def send_sample_signal(chat_id: int):
-    msg = (
-        "🔔 *QuotexAI Pro SIGNAL* — [BTC/USDT]\n" \
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" \
-        "🎯 Direction: UP 🟢\n" \
-        "📈 Confidence: 4/5\n" \
-        "⏱️ Expiry: 15 min\n" \
-        "🔍 Analysis: EMA Golden Cross, RSI 58, Volume Spike\n" \
-        "⚠️ Not financial advice."
-    )
-    bot.send_message(chat_id, msg)
+    signal = generate_signal_with_chart("BTC/USDT")
+    bot.send_message(chat_id, signal, parse_mode=None)
 
 
 def is_admin_user(message) -> bool:

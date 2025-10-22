@@ -30,13 +30,19 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 pending = {}
 
 
-def main_keyboard():
+def main_keyboard(uid: int | None = None):
     kb = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    kb.row(types.KeyboardButton("✅ SIGN UP"), types.KeyboardButton("🔑 LOGIN"))
-    kb.row(types.KeyboardButton("🚀 GET STARTED"), types.KeyboardButton("❓ HOW IT WORKS"))
-    kb.row(types.KeyboardButton("📈 LIVE SIGNALS"), types.KeyboardButton("📊 ANALYSIS TOOLS"))
-    kb.row(types.KeyboardButton("📅 PLAN STATUS"), types.KeyboardButton("💬 SUPPORT"))
-    kb.row(types.KeyboardButton("⚠️ RISK DISCLAIMER"))
+    if uid and is_logged_in(uid):
+        kb.row(types.KeyboardButton("🚀 GET STARTED"), types.KeyboardButton("📈 LIVE SIGNALS"))
+        kb.row(types.KeyboardButton("📊 ANALYSIS TOOLS"), types.KeyboardButton("📅 PLAN STATUS"))
+        kb.row(types.KeyboardButton("👤 PROFILE"), types.KeyboardButton("💬 SUPPORT"))
+        kb.row(types.KeyboardButton("⚠️ RISK DISCLAIMER"))
+    else:
+        kb.row(types.KeyboardButton("✅ SIGN UP"), types.KeyboardButton("🔑 LOGIN"))
+        kb.row(types.KeyboardButton("🚀 GET STARTED"), types.KeyboardButton("❓ HOW IT WORKS"))
+        kb.row(types.KeyboardButton("📈 LIVE SIGNALS"), types.KeyboardButton("📊 ANALYSIS TOOLS"))
+        kb.row(types.KeyboardButton("📅 PLAN STATUS"), types.KeyboardButton("💬 SUPPORT"))
+        kb.row(types.KeyboardButton("⚠️ RISK DISCLAIMER"))
     return kb
 
 
@@ -46,7 +52,7 @@ def start_cmd(message):
         "Welcome to *QuotexAI Pro*\n\n"
         "Choose an option below to continue."
     )
-    bot.send_message(message.chat.id, text, reply_markup=main_keyboard())
+    bot.send_message(message.chat.id, text, reply_markup=main_keyboard(message.chat.id))
 
 
 def is_logged_in(uid: int) -> bool:
@@ -212,7 +218,7 @@ def router(message):
         email = text
         db.create_user(uid, name, email)
         pending.pop(uid, None)
-        bot.send_message(uid, "Signup complete. You're logged in.")
+        bot.send_message(uid, "Signup complete. You're logged in.", reply_markup=main_keyboard(uid))
         return
     if state.get("stage") == "login_email":
         email = text
@@ -222,16 +228,22 @@ def router(message):
             pending.pop(uid, None)
             return
         db.link_email_to_telegram(email, uid)
-        bot.send_message(uid, "Login successful.")
+        bot.send_message(uid, "Login successful.", reply_markup=main_keyboard(uid))
         pending.pop(uid, None)
         return
 
     if text == "✅ SIGN UP":
+        if is_logged_in(uid):
+            bot.send_message(uid, "You're already logged in.", reply_markup=main_keyboard(uid))
+            return
         pending[uid] = {"stage": "signup_name"}
         bot.send_message(uid, "Enter your name:")
         return
 
     if text == "🔑 LOGIN":
+        if is_logged_in(uid):
+            bot.send_message(uid, "You're already logged in.", reply_markup=main_keyboard(uid))
+            return
         pending[uid] = {"stage": "login_email"}
         bot.send_message(uid, "Enter your registered email:")
         return
@@ -273,6 +285,22 @@ def router(message):
             bot.send_message(uid, f"Premium active until {u.get('expires_at')}")
         else:
             bot.send_message(uid, "No active plan. Use /premium to view payment options (USDT/UPI).")
+        return
+
+    if text == "👤 PROFILE":
+        u = db.get_user_by_telegram(uid)
+        if not u or not u.get("logged_in"):
+            bot.send_message(uid, "Please SIGN UP or LOGIN first.", reply_markup=main_keyboard(uid))
+            return
+        lines = [
+            "👤 Profile",
+            f"Name: {u.get('name') or '-'}",
+            f"Email: {u.get('email') or '-'}",
+            f"Premium: {'Active' if u.get('is_premium') else 'Inactive'}",
+        ]
+        if u.get('is_premium') and u.get('expires_at'):
+            lines.append(f"Expires: {u.get('expires_at')}")
+        bot.send_message(uid, "\n".join(lines), reply_markup=main_keyboard(uid))
         return
 
     if text == "💬 SUPPORT":

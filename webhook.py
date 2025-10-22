@@ -14,10 +14,10 @@ def create_webhook_blueprint(bot, db):
             token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
             if token != TELEGRAM_WEBHOOK_SECRET:
                 abort(401)
-        body = request.get_data(as_text=True)
-        if not body:
+        data = request.get_json(force=True, silent=True)
+        if not data:
             return "ok"
-        update = types.Update.de_json(body)
+        update = types.Update.de_json(data)
         bot.process_new_updates([update])
         return "ok"
 

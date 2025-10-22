@@ -1,3 +1,256 @@
+# QuotexAI Pro — Trade Smarter, Not Harder ⚡
+
+[![Build](https://img.shields.io/badge/build-passing-brightgreen)](#)
+[![Version](https://img.shields.io/badge/version-1.0.0-ff69b4.svg)](#)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
+[![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](#)
+[![Flask](https://img.shields.io/badge/Flask-3.x-black?logo=flask)](#)
+[![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4?logo=telegram&logoColor=white)](#)
+[![Render](https://img.shields.io/badge/Deploy-Render-46E3B7?logo=render)](#)
+[![Railway](https://img.shields.io/badge/Deploy-Railway-0B0D0E?logo=railway)](#)
+
+A premium-grade Telegram bot + admin panel that delivers ASCII-chart trading signals, manages subscriptions (USDT + UPI), and gives you a clean control center to message users, grant/revoke plans, and broadcast updates. Built to feel like a product launch, not a side project.
+
+---
+
+## Table of Contents
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Screenshots / Demo](#screenshots--demo)
+- [Tech Stack](#tech-stack)
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Usage Examples](#usage-examples)
+- [Folder Structure](#folder-structure)
+- [Deploy to Cloud](#deploy-to-cloud)
+- [Contributing](#contributing)
+- [License](#license)
+- [Contact](#contact)
+
+---
+
+## Overview
+QuotexAI Pro is a Flask-based Telegram bot that:
+- Authenticates users via in-chat signup/login
+- Sells 30‑day premium using USDT (TRON/EVM) or UPI
+- Sends professional, plain‑text ASCII trading signals with indicators and mini charts
+- Ships with an admin panel for user search, premium management, and broadcast
+
+Why it’s different:
+- Plain‑text charts render perfectly inside Telegram (no images)
+- Minimal, production‑minded codebase with secrets/environment separation
+- Works locally, on Railway/Render, and can plug into Supabase/Postgres later
+
+---
+
+## Architecture
+```mermaid
+flowchart LR
+  TG[Telegram User] -- /start,/premium,/signals --> Bot
+  subgraph App [Flask App]
+    Bot[pyTelegramBotAPI]
+    Admin[Admin Panel /admin]
+    DB[(SQLite / Postgres)]
+    Webhook[/webhook/telegram/]
+  end
+  TG -- Webhook callbacks --> Webhook
+  Bot <-- read/write --> DB
+  Admin <-- read/write --> DB
+```
+
+---
+
+## Screenshots / Demo
+- Bot chat (signals): `assets/screenshot-bot.png` (placeholder)
+- Admin dashboard: `assets/screenshot-admin.png` (placeholder)
+- Live demo: https://your-live-domain.example (optional)
+
+> Add your own screenshots to the `assets/` folder and update links above.
+
+---
+
+## Tech Stack
+- ⚙️ Backend: Python, Flask, pyTelegramBotAPI
+- 🧠 Signals: Pandas ASCII chart generator (`analysis.py`)
+- 💾 DB: SQLite by default; easy switch to Postgres/Supabase
+- 🧩 UI: Bootstrap 5 for a clean admin panel
+- 🔐 Secrets: `.env` with `python-dotenv`
+
+Badges:
+
+| Tech | Badge |
+|------|-------|
+| Python | ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white) |
+| Flask | ![Flask](https://img.shields.io/badge/Flask-3.x-black?logo=flask) |
+| Telegram | ![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4?logo=telegram&logoColor=white) |
+| Pandas | ![Pandas](https://img.shields.io/badge/Pandas-2.x-150458?logo=pandas&logoColor=white) |
+
+---
+
+## Features
+- ✔️ In‑chat signup/login with dynamic keyboard (Profile button after auth)
+- ✔️ Premium flow (₹499): USDT (TRON/EVM) or UPI submissions
+- ✔️ Admin panel at `/admin` with stats, search, grant/revoke, broadcast
+- ✔️ ASCII trading signals with mini candlestick‑style chart and indicators
+- ✔️ Webhook secret validation for Telegram
+- ✔️ FIFO premium queue foundation for automated matching
+- ✔️ Easy deployment to Render/Railway
+
+---
+
+## Quick Start
+```bash
+# 1) Create and activate a virtual environment
+python -m venv .venv
+# PowerShell (Windows):
+.\.venv\Scripts\Activate.ps1
+# macOS/Linux:
+# source .venv/bin/activate
+
+# 2) Install dependencies
+pip install -r requirements.txt
+
+# 3) Configure .env (see Configuration section)
+
+# 4) Run locally
+python main.py
+# App: http://127.0.0.1:5000
+# Health: http://127.0.0.1:5000/health
+```
+
+Set Telegram webhook (replace with your domain or tunnel URL):
+```powershell
+$BOT_TOKEN = "<your-bot-token>"
+$APP_BASE_URL = "https://<your-domain>"
+$SECRET = "<your-telegram-webhook-secret>"
+Invoke-WebRequest -Uri "https://api.telegram.org/bot$BOT_TOKEN/setWebhook?url=$APP_BASE_URL/webhook/telegram&secret_token=$SECRET"
+```
+Check status:
+```powershell
+Invoke-WebRequest -Uri "https://api.telegram.org/bot$BOT_TOKEN/getWebhookInfo"
+```
+
+---
+
+## Configuration
+Create `.env` at the project root:
+```env
+BOT_TOKEN=123456:ABC...           # from @BotFather
+ADMIN_ID=7042793133               # numeric ID or @username
+SECRET_KEY=change_me              # Flask session secret
+DATABASE_PATH=data.db             # or /data/data.db when using a mounted disk
+
+# Payment receiving (show in /premium)
+TRON_ADDRESS=T...
+EVM_ADDRESS=0x...
+UPI_ID=yourname@oksbi
+
+# Optional explorer keys (for future auto-monitor)
+TRONGRID_API_KEY=...
+ETHERSCAN_API_KEY=...
+BSCSCAN_API_KEY=...
+POLYGONSCAN_API_KEY=...
+
+# Webhook
+APP_BASE_URL=https://your-app.example
+TELEGRAM_WEBHOOK_SECRET=super-secret-header
+```
+> Cloud hosting: add the same keys in your service dashboard (Render/Railway).
+
+---
+
+## Usage Examples
+- Start the bot: `/start`
+- View premium options: `/premium`
+- Submit USDT tx: `/verify <TRANSACTION_ID>`
+- Submit UPI proof: `/verify_upi Full Name`
+- Admin grant (from admin ID only): `/admin_grant <TELEGRAM_USER_ID>`
+- Premium signals (requires premium): `/signals`
+
+Example signal (ASCII):
+```
+🔔 QUOTEXAI PRO SIGNAL — BTC/USDT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📈 PRICE ACTION (5-min)
+68100 ────────────────/\
+67600 │  /\   ← EMA 50
+67100 │ /  \  ← EMA 200
+66600 │/    ▲
+10:00 10:05 10:10 10:15
+🎯 Direction: UP 🟢
+📊 Confidence: 4/5
+⏱️ Expiry: 15 min
+🔍 Analysis:
+• ✅ EMA Golden Cross (50 > 200)
+• ✅ RSI(14): 58
+• ✅ MACD Hist: +0.0034
+⚠️ Trading involves high risk. Not financial advice.
+🕒 Generated: 10:12 AM IST
+```
+
+---
+
+## Folder Structure
+```
+quotex-bot/
+├─ analysis.py              # ASCII chart & indicators
+├─ admin.py                 # Admin blueprint (grant/revoke/broadcast)
+├─ database.py              # SQLite schema and helpers
+├─ main.py                  # Flask app + Telegram bot
+├─ webhook.py               # Telegram webhook endpoint
+├─ templates/
+│  ├─ admin.html            # Admin panel UI
+│  └─ pay.html              # Legacy (unused) template
+├─ static/
+│  └─ style.css             # Minimal styles
+├─ requirements.txt         # Dependencies
+├─ README.md                # This file
+└─ .env                     # Environment variables (do not commit)
+```
+
+---
+
+## Deploy to Cloud
+- 🚄 Railway
+  1. Create project → connect repo
+  2. Variables: copy everything from `.env`
+  3. Start Command: `python main.py`
+  4. Add a volume and set `DATABASE_PATH=/data/data.db` for persistence
+  5. Set Telegram webhook to `https://<railway-domain>/webhook/telegram`
+
+- 🚀 Render
+  1. New Web Service → connect repo
+  2. Build: `pip install -r requirements.txt` (auto) • Start: `python main.py`
+  3. Add a Disk and set `DATABASE_PATH=/data/data.db`
+  4. Set Telegram webhook to your Render URL
+
+> Prefer Postgres? Add `DATABASE_URL` and migrate `database.py` to use Supabase/PG.
+
+---
+
+## Contributing
+Contributions are welcome!
+- Fork the repo and create a feature branch
+- Keep PRs focused and add a short description
+- For bigger changes, open an issue first to discuss design/UX
+
+---
+
+## License
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](#)
+
+This project is released under the MIT License. See `LICENSE` for details.
+
+---
+
+## Contact
+- GitHub: https://github.com/virajverse
+- LinkedIn: https://www.linkedin.com/in/your-handle
+- Website: https://your-website.com
+
+Made with ❤️ for the trading community.
+
 # QuotexAI Pro — Telegram Bot + Admin Panel
 
 A professional Telegram bot with premium access, USDT (TRON/EVM) + UPI payments, and an admin dashboard.

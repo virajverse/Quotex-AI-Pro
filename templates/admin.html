@@ -66,7 +66,7 @@
         {% endfor %}
       {% endif %}
     {% endwith %}
-    <script id="admin-data" type="application/json">{{ {'stats': stats, 'logs': logs}|tojson }}</script>
+    <script id="admin-data" type="application/json">{{ {'stats': stats, 'actions': (logs | map(attribute='action') | list)}|tojson }}</script>
 
     <div class="row g-3 mb-2">
       <div class="col-6 col-md-3"><div class="card stat"><div class="card-body"><div class="small text-muted">Total Users</div><div class="h4">{{ stats.total_users }}</div></div></div></div>
@@ -262,9 +262,9 @@
       });
     }
 
-    const logsData = adminData.logs || [];
+    const actionsData = adminData.actions || [];
     const counts = {};
-    for (const l of logsData) { counts[l.action] = (counts[l.action] || 0) + 1; }
+    for (const a of actionsData) { counts[a] = (counts[a] || 0) + 1; }
     const labels = Object.keys(counts);
     const values = labels.map(k => counts[k]);
     const ctxActions = document.getElementById('chartActions');

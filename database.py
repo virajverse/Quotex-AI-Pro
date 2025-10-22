@@ -1,6 +1,9 @@
 import json
 import os
 import sqlite3
+import time
+import logging
+from urllib.parse import urlparse, parse_qs, unquote
 from datetime import datetime, timedelta, date
 from typing import Optional
 try:
@@ -20,12 +23,50 @@ class Database:
         if not self.is_pg:
             os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         self._init_db()
+        self.logger = logging.getLogger("database")
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            fmt = logging.Formatter("[%(asctime)s] %(levelname)s in %(name)s: %(message)s")
+            handler.setFormatter(fmt)
+            self.logger.addHandler(handler)
+        self.logger.setLevel(logging.INFO)
 
     def _connect(self):
         if self.is_pg:
             if psycopg2 is None:
                 raise RuntimeError("psycopg2 is required for Postgres but is not installed")
-            return psycopg2.connect(self.pg_url)
+            # Parse DATABASE_URL and build connection kwargs
+            parsed = urlparse(self.pg_url)
+            host = parsed.hostname
+            port = parsed.port or 5432
+            dbname = (parsed.path or "/postgres").lstrip("/")
+            user = unquote(parsed.username) if parsed.username else None
+            password = unquote(parsed.password) if parsed.password else None
+            q = parse_qs(parsed.query)
+            sslmode = (q.get("sslmode", ["require"]))[0]
+            # Force using hostname (no hostaddr) so libpq resolves; IPv4-only hosts like Render will reach IPv4
+            kwargs = {
+                "host": host,
+                "port": port,
+                "dbname": dbname,
+                "user": user,
+                "password": password,
+                "sslmode": sslmode,
+                "connect_timeout": 10,
+                "application_name": "QuotexAI Pro",
+            }
+            # Retry logic: 1 initial + 2 retries
+            last_err = None
+            for attempt in range(3):
+                try:
+                    return psycopg2.connect(**kwargs)
+                except psycopg2.OperationalError as e:
+                    last_err = e
+                    self.logger.error(f"Postgres connect failed (attempt {attempt+1}/3): {e}")
+                    if attempt < 2:
+                        time.sleep(2)
+                        continue
+                    raise
         conn = sqlite3.connect(self.path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         return conn
@@ -248,14 +289,18 @@ class Database:
                 return False
             return expd >= datetime.utcnow().date()
 
-    def list_users(self, limit: int = 200):
+    def list_users(self):
         with self._connect() as conn:
             cur = self._execute(
                 conn,
-                "SELECT id, telegram_id, name, email, is_premium, expires_at, last_login, logged_in FROM users ORDER BY last_login DESC LIMIT ?",
-                (limit,),
+                "SELECT id, telegram_id, name, email, is_premium, expires_at, last_login, logged_in FROM users ORDER BY last_login DESC",
+                (),
             )
             return [dict(r) for r in cur.fetchall()]
+
+    # Compatibility wrapper per new API requirement
+    def get_user(self, telegram_id: int):
+        return self.get_user_by_telegram(telegram_id)
 
     def search_users(self, q: str, limit: int = 200):
         like = f"%{q}%"

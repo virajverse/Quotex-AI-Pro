@@ -1,22 +1,39 @@
 import json
 import os
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Optional
+try:
+    import psycopg2  # type: ignore
+    import psycopg2.extras as pg_extras  # type: ignore
+except Exception:  # psycopg2 is optional; only needed when DATABASE_URL is set
+    psycopg2 = None
+    pg_extras = None
 
 
 class Database:
     def __init__(self, path: str = None):
+        # Prefer Postgres if DATABASE_URL is provided; fallback to SQLite
+        self.pg_url = (os.getenv("DATABASE_URL", "") or "").strip()
+        self.is_pg = bool(self.pg_url.startswith("postgres"))
         self.path = path or os.getenv("DATABASE_PATH", "data.db")
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        if not self.is_pg:
+            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         self._init_db()
 
     def _connect(self):
+        if self.is_pg:
+            if psycopg2 is None:
+                raise RuntimeError("psycopg2 is required for Postgres but is not installed")
+            return psycopg2.connect(self.pg_url)
         conn = sqlite3.connect(self.path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         return conn
 
     def _init_db(self):
+        if self.is_pg:
+            # Schema should be created via supabase_schema.sql
+            return
         with self._connect() as conn:
             cur = conn.cursor()
             cur.execute(
@@ -94,110 +111,147 @@ class Database:
             )
             conn.commit()
 
+    def _cursor(self, conn):
+        if self.is_pg:
+            return conn.cursor(cursor_factory=pg_extras.RealDictCursor)
+        return conn.cursor()
+
+    def _execute(self, conn, sql: str, params: tuple = ()):  # helper to unify placeholders
+        if self.is_pg:
+            # Normalize SQLite-specific syntax to Postgres
+            sql = sql.replace("?", "%s")
+            sql = sql.replace("datetime('now')", "NOW()")
+            sql = sql.replace("date('now')", "CURRENT_DATE")
+            s = sql.lstrip()
+            if s.upper().startswith("INSERT OR IGNORE INTO "):
+                # Convert to INSERT ... ON CONFLICT DO NOTHING
+                sql = sql.replace("INSERT OR IGNORE INTO", "INSERT INTO", 1) + " ON CONFLICT DO NOTHING"
+            cur = self._cursor(conn)
+            cur.execute(sql, params)
+            return cur
+        cur = self._cursor(conn)
+        cur.execute(sql, params)
+        return cur
+
     def create_user(self, telegram_id: int, name: str, email: str):
+        ts = datetime.utcnow()
         with self._connect() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "INSERT OR IGNORE INTO users (telegram_id, name, email, last_login, logged_in) VALUES (?, ?, ?, datetime('now'), 1)",
-                (telegram_id, name, email),
+            self._execute(
+                conn,
+                "INSERT OR IGNORE INTO users (telegram_id, name, email, last_login, logged_in) VALUES (?, ?, ?, ?, ?)",
+                (telegram_id, name, email, ts, True),
             )
-            cur.execute(
-                "UPDATE users SET name=COALESCE(?, name), email=COALESCE(?, email), last_login=datetime('now'), logged_in=1 WHERE telegram_id=?",
-                (name, email, telegram_id),
+            self._execute(
+                conn,
+                "UPDATE users SET name=COALESCE(?, name), email=COALESCE(?, email), last_login=?, logged_in=? WHERE telegram_id=?",
+                (name, email, ts, True, telegram_id),
             )
             conn.commit()
 
     def update_last_login(self, telegram_id: int):
+        ts = datetime.utcnow()
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE users SET last_login=datetime('now') WHERE telegram_id=?",
-                (telegram_id,),
+            self._execute(
+                conn,
+                "UPDATE users SET last_login=? WHERE telegram_id=?",
+                (ts, telegram_id),
             )
             conn.commit()
 
     def set_logged_in(self, telegram_id: int, logged_in: bool):
         with self._connect() as conn:
-            conn.execute(
+            self._execute(
+                conn,
                 "UPDATE users SET logged_in=? WHERE telegram_id=?",
-                (1 if logged_in else 0, telegram_id),
+                (bool(logged_in), telegram_id),
             )
             conn.commit()
 
     def get_user_by_telegram(self, telegram_id: int):
         with self._connect() as conn:
-            cur = conn.execute(
-                "SELECT * FROM users WHERE telegram_id=?", (telegram_id,)
-            )
+            cur = self._execute(conn, "SELECT * FROM users WHERE telegram_id=?", (telegram_id,))
             row = cur.fetchone()
             return dict(row) if row else None
 
     def get_user_by_email(self, email: str):
         with self._connect() as conn:
-            cur = conn.execute("SELECT * FROM users WHERE email=?", (email,))
+            cur = self._execute(conn, "SELECT * FROM users WHERE email=?", (email,))
             row = cur.fetchone()
             return dict(row) if row else None
 
     def link_email_to_telegram(self, email: str, telegram_id: int):
+        ts = datetime.utcnow()
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE users SET telegram_id=?, last_login=datetime('now'), logged_in=1 WHERE email=?",
-                (telegram_id, email),
+            self._execute(
+                conn,
+                "UPDATE users SET telegram_id=?, last_login=?, logged_in=? WHERE email=?",
+                (telegram_id, ts, True, email),
             )
             conn.commit()
 
     def grant_premium(self, telegram_id: int, days: int = 30):
         with self._connect() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT expires_at FROM users WHERE telegram_id=?", (telegram_id,))
+            cur = self._execute(conn, "SELECT expires_at FROM users WHERE telegram_id=?", (telegram_id,))
             row = cur.fetchone()
             now = datetime.utcnow()
-            if row and row[0]:
+            if row:
+                r = dict(row)
+                val = r.get("expires_at")
                 try:
-                    current_expiry = datetime.fromisoformat(row[0])
+                    if isinstance(val, date):
+                        current_expiry = datetime.combine(val, datetime.min.time())
+                    elif isinstance(val, str):
+                        current_expiry = datetime.fromisoformat(val)
+                    else:
+                        current_expiry = now
                 except Exception:
                     current_expiry = now
             else:
                 current_expiry = now
             base = current_expiry if current_expiry > now else now
             new_expiry = base + timedelta(days=days)
-            cur.execute(
-                "UPDATE users SET is_premium=1, expires_at=?, logged_in=1 WHERE telegram_id=?",
-                (new_expiry.date().isoformat(), telegram_id),
+            self._execute(
+                conn,
+                "UPDATE users SET is_premium=?, expires_at=?, logged_in=? WHERE telegram_id=?",
+                (True, new_expiry.date(), True, telegram_id),
             )
             conn.commit()
 
     def revoke_premium(self, telegram_id: int):
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE users SET is_premium=0, expires_at=NULL WHERE telegram_id=?",
-                (telegram_id,),
+            self._execute(
+                conn,
+                "UPDATE users SET is_premium=?, expires_at=NULL WHERE telegram_id=?",
+                (False, telegram_id),
             )
             conn.commit()
 
     def is_premium_active(self, telegram_id: int) -> bool:
         with self._connect() as conn:
-            cur = conn.execute(
-                "SELECT is_premium, expires_at FROM users WHERE telegram_id=?",
-                (telegram_id,),
-            )
+            cur = self._execute(conn, "SELECT is_premium, expires_at FROM users WHERE telegram_id=?", (telegram_id,))
             row = cur.fetchone()
             if not row:
                 return False
-            is_premium = row[0] == 1
+            r = dict(row)
+            is_premium = bool(r.get("is_premium"))
             if not is_premium:
                 return False
-            expires_at = row[1]
+            expires_at = r.get("expires_at")
             if not expires_at:
                 return False
             try:
-                exp = datetime.fromisoformat(expires_at)
+                if isinstance(expires_at, date):
+                    expd = expires_at
+                else:
+                    expd = datetime.fromisoformat(str(expires_at)).date()
             except Exception:
                 return False
-            return exp.date() >= datetime.utcnow().date()
+            return expd >= datetime.utcnow().date()
 
     def list_users(self, limit: int = 200):
         with self._connect() as conn:
-            cur = conn.execute(
+            cur = self._execute(
+                conn,
                 "SELECT id, telegram_id, name, email, is_premium, expires_at, last_login, logged_in FROM users ORDER BY last_login DESC LIMIT ?",
                 (limit,),
             )
@@ -206,7 +260,8 @@ class Database:
     def search_users(self, q: str, limit: int = 200):
         like = f"%{q}%"
         with self._connect() as conn:
-            cur = conn.execute(
+            cur = self._execute(
+                conn,
                 "SELECT id, telegram_id, name, email, is_premium, expires_at, last_login, logged_in FROM users WHERE CAST(telegram_id AS TEXT) LIKE ? OR name LIKE ? OR email LIKE ? ORDER BY last_login DESC LIMIT ?",
                 (like, like, like, limit),
             )
@@ -214,33 +269,48 @@ class Database:
 
     def stats_total_users(self) -> int:
         with self._connect() as conn:
-            cur = conn.execute("SELECT COUNT(*) FROM users")
-            return cur.fetchone()[0]
+            cur = self._execute(conn, "SELECT COUNT(*) AS c FROM users")
+            row = cur.fetchone()
+            return int(dict(row)["c"]) if row else 0
 
     def stats_active_premium(self) -> int:
         with self._connect() as conn:
-            cur = conn.execute(
-                "SELECT COUNT(*) FROM users WHERE is_premium=1 AND expires_at >= date('now')"
+            cur = self._execute(
+                conn,
+                "SELECT COUNT(*) AS c FROM users WHERE is_premium=? AND expires_at >= date('now')",
+                (True,),
             )
-            return cur.fetchone()[0]
+            row = cur.fetchone()
+            return int(dict(row)["c"]) if row else 0
 
     def stats_new_signups_today(self) -> int:
         with self._connect() as conn:
-            cur = conn.execute(
-                "SELECT COUNT(*) FROM users WHERE date(last_login)=date('now')"
+            cur = self._execute(
+                conn,
+                "SELECT COUNT(*) AS c FROM users WHERE date(last_login)=date('now')",
+                (),
             )
-            return cur.fetchone()[0]
+            row = cur.fetchone()
+            return int(dict(row)["c"]) if row else 0
 
     def get_premium_user_ids(self):
         with self._connect() as conn:
-            cur = conn.execute(
-                "SELECT telegram_id FROM users WHERE is_premium=1 AND expires_at >= date('now') AND telegram_id IS NOT NULL"
+            cur = self._execute(
+                conn,
+                "SELECT telegram_id FROM users WHERE is_premium=? AND expires_at >= date('now') AND telegram_id IS NOT NULL",
+                (True,),
             )
-            return [r[0] for r in cur.fetchall()]
+            rows = cur.fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                out.append(d.get("telegram_id"))
+            return out
 
     def admin_log(self, admin_id: str, action: str, target: str):
         with self._connect() as conn:
-            conn.execute(
+            self._execute(
+                conn,
                 "INSERT INTO admin_logs (admin_id, action, target) VALUES (?, ?, ?)",
                 (admin_id, action, target),
             )
@@ -248,7 +318,8 @@ class Database:
 
     def recent_admin_logs(self, limit: int = 20):
         with self._connect() as conn:
-            cur = conn.execute(
+            cur = self._execute(
+                conn,
                 "SELECT created_at, admin_id, action, target FROM admin_logs ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             )
@@ -256,7 +327,8 @@ class Database:
 
     def add_verification(self, telegram_id: int, tx_id: str, status: str = "pending"):
         with self._connect() as conn:
-            conn.execute(
+            self._execute(
+                conn,
                 "INSERT INTO verifications (telegram_id, tx_id, status) VALUES (?, ?, ?)",
                 (telegram_id, tx_id, status),
             )
@@ -264,7 +336,8 @@ class Database:
 
     def list_pending_verifications(self, limit: int = 50):
         with self._connect() as conn:
-            cur = conn.execute(
+            cur = self._execute(
+                conn,
                 "SELECT id, created_at, telegram_id, tx_id, status FROM verifications WHERE status='pending' ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             )
@@ -272,7 +345,8 @@ class Database:
 
     def set_verification_status(self, verification_id: int, status: str):
         with self._connect() as conn:
-            conn.execute(
+            self._execute(
+                conn,
                 "UPDATE verifications SET status=? WHERE id=?",
                 (status, verification_id),
             )
@@ -280,11 +354,13 @@ class Database:
 
     def enqueue_premium_request(self, telegram_id: int):
         with self._connect() as conn:
-            conn.execute(
+            self._execute(
+                conn,
                 "DELETE FROM premium_queue WHERE telegram_id=? AND matched_payment_id IS NOT NULL",
                 (telegram_id,),
             )
-            conn.execute(
+            self._execute(
+                conn,
                 "INSERT OR IGNORE INTO premium_queue (telegram_id) VALUES (?)",
                 (telegram_id,),
             )
@@ -292,7 +368,8 @@ class Database:
 
     def remove_from_queue(self, telegram_id: int):
         with self._connect() as conn:
-            conn.execute(
+            self._execute(
+                conn,
                 "DELETE FROM premium_queue WHERE telegram_id=?",
                 (telegram_id,),
             )
@@ -300,24 +377,24 @@ class Database:
 
     def pop_next_premium_request(self):
         with self._connect() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT id, telegram_id, created_at FROM premium_queue WHERE matched_payment_id IS NULL ORDER BY created_at ASC LIMIT 1"
+            cur = self._execute(
+                conn,
+                "SELECT id, telegram_id, created_at FROM premium_queue WHERE matched_payment_id IS NULL ORDER BY created_at ASC LIMIT 1",
+                (),
             )
             row = cur.fetchone()
             if not row:
                 return None
-            queue_id = row[0]
-            conn.execute(
-                "UPDATE premium_queue SET matched_payment_id=-1 WHERE id=?",
-                (queue_id,),
-            )
+            d = dict(row)
+            queue_id = d.get("id")
+            self._execute(conn, "UPDATE premium_queue SET matched_payment_id=-1 WHERE id=?", (queue_id,))
             conn.commit()
-            return {"id": row[0], "telegram_id": row[1], "created_at": row[2]}
+            return {"id": d.get("id"), "telegram_id": d.get("telegram_id"), "created_at": d.get("created_at")}
 
     def mark_queue_matched(self, queue_id: int, payment_id: int):
         with self._connect() as conn:
-            conn.execute(
+            self._execute(
+                conn,
                 "UPDATE premium_queue SET matched_payment_id=? WHERE id=?",
                 (payment_id, queue_id),
             )
@@ -325,7 +402,8 @@ class Database:
 
     def list_premium_queue(self, limit: int = 50):
         with self._connect() as conn:
-            cur = conn.execute(
+            cur = self._execute(
+                conn,
                 "SELECT id, telegram_id, created_at, matched_payment_id FROM premium_queue ORDER BY created_at ASC LIMIT ?",
                 (limit,),
             )
@@ -334,15 +412,20 @@ class Database:
     def log_payment(self, network: str, tx_hash: str, from_address: str, to_address: str, amount: float, status: str, matched_telegram_id: Optional[int] = None, raw: Optional[dict] = None):
         raw_str = json.dumps(raw, ensure_ascii=False) if raw is not None else None
         with self._connect() as conn:
-            cur = conn.cursor()
-            cur.execute(
+            cur = self._execute(
+                conn,
                 "INSERT OR IGNORE INTO payment_logs (network, tx_hash, from_address, to_address, amount, status, matched_telegram_id, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (network, tx_hash, from_address, to_address, amount, status, matched_telegram_id, raw_str),
             )
-            if cur.lastrowid:
+            inserted = (cur.rowcount == 1)
+            if inserted:
                 conn.commit()
-                return cur.lastrowid, True
-            cur.execute(
+                # fetch id
+                sel = self._execute(conn, "SELECT id FROM payment_logs WHERE tx_hash=?", (tx_hash,))
+                r = sel.fetchone()
+                return (dict(r).get("id") if r else None), True
+            cur = self._execute(
+                conn,
                 "SELECT id, status, matched_telegram_id FROM payment_logs WHERE tx_hash=?",
                 (tx_hash,),
             )
@@ -350,11 +433,13 @@ class Database:
             conn.commit()
             if not row:
                 return None, False
-            return row[0], False
+            d = dict(row)
+            return d.get("id"), False
 
     def update_payment_status(self, payment_id: int, status: str, matched_telegram_id: Optional[int] = None):
         with self._connect() as conn:
-            conn.execute(
+            self._execute(
+                conn,
                 "UPDATE payment_logs SET status=?, matched_telegram_id=COALESCE(?, matched_telegram_id) WHERE id=?",
                 (status, matched_telegram_id, payment_id),
             )
@@ -362,7 +447,8 @@ class Database:
 
     def get_payment_by_tx(self, tx_hash: str):
         with self._connect() as conn:
-            cur = conn.execute(
+            cur = self._execute(
+                conn,
                 "SELECT id, network, tx_hash, from_address, to_address, amount, status, matched_telegram_id FROM payment_logs WHERE tx_hash=?",
                 (tx_hash,),
             )
@@ -371,7 +457,8 @@ class Database:
 
     def recent_payment_logs(self, limit: int = 50):
         with self._connect() as conn:
-            cur = conn.execute(
+            cur = self._execute(
+                conn,
                 "SELECT id, created_at, network, tx_hash, from_address, to_address, amount, status, matched_telegram_id FROM payment_logs ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             )
@@ -381,7 +468,8 @@ class Database:
         if vtype not in ("upi", "usdt"):
             raise ValueError("invalid verification type")
         with self._connect() as conn:
-            conn.execute(
+            self._execute(
+                conn,
                 "INSERT INTO pending_verifications (telegram_id, type, data) VALUES (?, ?, ?)",
                 (telegram_id, vtype, data),
             )
@@ -391,8 +479,49 @@ class Database:
         if vtype not in ("upi", "usdt"):
             raise ValueError("invalid verification type")
         with self._connect() as conn:
-            cur = conn.execute(
+            cur = self._execute(
+                conn,
                 "SELECT id, telegram_id, type, data, timestamp FROM pending_verifications WHERE type=? ORDER BY timestamp DESC LIMIT ?",
                 (vtype, limit),
             )
             return [dict(r) for r in cur.fetchall()]
+
+    # Expiry reminder helpers
+    def users_expiring_on(self, target_date: date, limit: int = 1000):
+        with self._connect() as conn:
+            cur = self._execute(
+                conn,
+                "SELECT telegram_id, expires_at FROM users WHERE is_premium=? AND telegram_id IS NOT NULL AND expires_at=? ORDER BY telegram_id ASC LIMIT ?",
+                (True, target_date, limit),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def users_expired_before(self, today: date, limit: int = 1000):
+        with self._connect() as conn:
+            cur = self._execute(
+                conn,
+                "SELECT telegram_id, expires_at FROM users WHERE is_premium=? AND telegram_id IS NOT NULL AND expires_at<? ORDER BY expires_at ASC LIMIT ?",
+                (True, today, limit),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def set_premium_status(self, telegram_id: int, is_premium: bool):
+        with self._connect() as conn:
+            self._execute(
+                conn,
+                "UPDATE users SET is_premium=? WHERE telegram_id=?",
+                (bool(is_premium), telegram_id),
+            )
+            conn.commit()
+
+    def has_sent_notice_today(self, telegram_id: int, action: str) -> bool:
+        with self._connect() as conn:
+            cur = self._execute(
+                conn,
+                "SELECT 1 AS x FROM admin_logs WHERE action=? AND target=? AND date(created_at)=date('now') LIMIT 1",
+                (action, str(telegram_id)),
+            )
+            return cur.fetchone() is not None
+
+    def record_notice(self, telegram_id: int, action: str):
+        self.admin_log("system", action, str(telegram_id))

@@ -1,5 +1,7 @@
 import os
-from datetime import datetime
+import threading
+import time
+from datetime import datetime, timedelta, date
 from flask import Flask, jsonify
 from dotenv import load_dotenv
 import telebot
@@ -197,6 +199,17 @@ def admin_list_queue_cmd(message):
     bot.send_message(message.chat.id, "\n".join(lines))
 
 
+@bot.message_handler(commands=["logout"])    
+def logout_cmd(message):
+    uid = message.chat.id
+    u = db.get_user_by_telegram(uid)
+    if not u or not u.get("logged_in"):
+        bot.send_message(uid, "You're not logged in.", reply_markup=main_keyboard(uid))
+        return
+    db.set_logged_in(uid, False)
+    bot.send_message(uid, "You have been logged out.", reply_markup=main_keyboard(uid))
+
+
 @bot.message_handler(func=lambda m: True)    
 def router(message):
     uid = message.chat.id
@@ -323,5 +336,50 @@ def health():
     return jsonify({"ok": True})
 
 
+@app.route("/health/db")    
+def health_db():
+    try:
+        total = db.stats_total_users()
+        return jsonify({"ok": True, "total_users": int(total)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 if __name__ == "__main__":
+    def scheduler_loop():
+        while True:
+            try:
+                today = date.today()
+                for delta in (3, 1):
+                    target = today + timedelta(days=delta)
+                    users = db.users_expiring_on(target, 1000)
+                    for u in users:
+                        uid = u.get("telegram_id")
+                        if not uid:
+                            continue
+                        action = f"notice_d{delta}"
+                        if db.has_sent_notice_today(uid, action):
+                            continue
+                        try:
+                            bot.send_message(uid, f"⏰ Reminder: Your premium expires in {delta} day(s). Renew to keep access to signals.")
+                            db.record_notice(uid, action)
+                        except Exception:
+                            pass
+                expired = db.users_expired_before(today, 1000)
+                for u in expired:
+                    uid = u.get("telegram_id")
+                    if not uid:
+                        continue
+                    try:
+                        db.set_premium_status(uid, False)
+                        bot.send_message(uid, "❗ Your premium has expired. Use /premium to renew.")
+                        db.record_notice(uid, "notice_expired")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            time.sleep(3600)
+
+    t = threading.Thread(target=scheduler_loop, daemon=True)
+    t.start()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))

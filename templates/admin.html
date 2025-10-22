@@ -1,0 +1,214 @@
+{% if view == 'login' %}
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="{{ url_for('static', filename='style.css') }}" rel="stylesheet">
+  <title>Admin Login — QuotexAI Pro</title>
+</head>
+<body class="bg-light">
+  <div class="container py-5" style="max-width:480px;">
+    <div class="card shadow-sm">
+      <div class="card-header text-center"><strong>🔐 ADMIN PANEL — QuotexAI Pro</strong></div>
+      <div class="card-body">
+        {% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
+        <form method="post">
+          <div class="mb-3">
+            <label class="form-label">Telegram User ID</label>
+            <input type="text" class="form-control" name="telegram_id" required>
+          </div>
+          <button class="btn btn-primary w-100">Login</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+{% else %}
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="{{ url_for('static', filename='style.css') }}" rel="stylesheet">
+  <title>Admin — QuotexAI Pro</title>
+</head>
+<body>
+  <nav class="navbar navbar-dark bg-dark">
+    <div class="container-fluid">
+      <span class="navbar-brand">🔐 ADMIN PANEL — QuotexAI Pro</span>
+      <a class="btn btn-outline-light" href="{{ url_for('admin.logout') }}">Logout</a>
+    </div>
+  </nav>
+
+  <div class="container my-4">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="alert alert-{{ category }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <div class="row g-3 mb-2">
+      <div class="col-6 col-md-3"><div class="card stat"><div class="card-body"><div class="small text-muted">Total Users</div><div class="h4">{{ stats.total_users }}</div></div></div></div>
+      <div class="col-6 col-md-3"><div class="card stat"><div class="card-body"><div class="small text-muted">Active Premium</div><div class="h4">{{ stats.active_premium }}</div></div></div></div>
+      <div class="col-6 col-md-3"><div class="card stat"><div class="card-body"><div class="small text-muted">Today's New</div><div class="h4">{{ stats.new_signups_today }}</div></div></div></div>
+      <div class="col-6 col-md-3"><div class="card stat"><div class="card-body"><div class="small text-muted">Signal Success</div><div class="h4">N/A</div></div></div></div>
+    </div>
+
+    <div class="card my-3">
+      <div class="card-body">
+        <form class="row g-2" method="get" action="{{ url_for('admin.dashboard') }}">
+          <div class="col-12 col-md-6">
+            <input type="text" name="q" class="form-control" placeholder="🔍 Search User: ID, name, email" value="{{ request.args.get('q','') }}">
+          </div>
+          <div class="col-6 col-md-2"><button class="btn btn-secondary w-100">Search</button></div>
+          <div class="col-12 col-md-4 text-end small text-muted align-self-center">🛠️ Manual premium verification in progress</div>
+        </form>
+      </div>
+    </div>
+
+    <div class="row g-3">
+      <div class="col-md-6">
+        <div class="card h-100">
+          <div class="card-header">➕ Grant Premium</div>
+          <div class="card-body">
+            <form method="post" action="{{ url_for('admin.grant') }}" class="row g-2">
+              <div class="col-8"><input class="form-control" name="ident" placeholder="Telegram ID or Email" required></div>
+              <div class="col-4"><input class="form-control" name="days" type="number" min="1" value="30"></div>
+              <div class="col-12"><button class="btn btn-success w-100">✅ Grant Premium (30 days)</button></div>
+            </form>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div class="card h-100">
+          <div class="card-header">❌ Revoke Premium</div>
+          <div class="card-body">
+            <form method="post" action="{{ url_for('admin.revoke') }}" class="row g-2">
+              <div class="col-8"><input class="form-control" name="ident" placeholder="Telegram ID or Email" required></div>
+              <div class="col-4"><button class="btn btn-warning w-100">Revoke</button></div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card my-3">
+      <div class="card-header">📣 Broadcast to Premium Users</div>
+      <div class="card-body">
+        <form method="post" action="{{ url_for('admin.broadcast') }}">
+          <textarea class="form-control mb-2" id="broadcastText" name="text" rows="3" placeholder="Send message to all premium users"></textarea>
+          <div class="d-flex gap-2">
+            <button type="button" class="btn btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#broadcastPreview">Preview</button>
+            <button class="btn btn-primary">Broadcast</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div class="row g-3">
+      <div class="col-lg-7">
+        <div class="card">
+          <div class="card-header">USERS TABLE</div>
+          <div class="table-responsive">
+            <table class="table table-sm table-striped align-middle mb-0">
+              <thead>
+                <tr>
+                  <th>Telegram ID</th>
+                  <th>Name</th>
+                  <th>Email</th>
+                  <th>Premium</th>
+                  <th>Expiry</th>
+                  <th>Last Login</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for u in users %}
+                <tr>
+                  <td>{{ u.telegram_id }}</td>
+                  <td>{{ u.name or '-' }}</td>
+                  <td>{{ u.email or '-' }}</td>
+                  <td>{% if u.is_premium %}✅{% else %}❌{% endif %}</td>
+                  <td>{{ u.expires_at or '-' }}</td>
+                  <td>{{ u.last_login or '-' }}</td>
+                  <td>
+                    <form method="post" action="{{ url_for('admin.grant') }}" class="d-inline">
+                      <input type="hidden" name="ident" value="{{ u.telegram_id }}">
+                      <input type="hidden" name="days" value="30">
+                      <button class="btn btn-success btn-sm">✅</button>
+                    </form>
+                    <form method="post" action="{{ url_for('admin.revoke') }}" class="d-inline">
+                      <input type="hidden" name="ident" value="{{ u.telegram_id }}">
+                      <button class="btn btn-warning btn-sm">❌</button>
+                    </form>
+                    <button class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#msg{{ u.telegram_id }}">📧</button>
+
+                    <div class="modal fade" id="msg{{ u.telegram_id }}" tabindex="-1">
+                      <div class="modal-dialog">
+                        <div class="modal-content">
+                          <div class="modal-header"><h5 class="modal-title">Send Message</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+                          <form method="post" action="{{ url_for('admin.message_user') }}">
+                            <div class="modal-body">
+                              <input type="hidden" name="ident" value="{{ u.telegram_id }}">
+                              <textarea class="form-control" name="text" rows="4" placeholder="Type your message"></textarea>
+                            </div>
+                            <div class="modal-footer">
+                              <button class="btn btn-primary">Send</button>
+                            </div>
+                          </form>
+                        </div>
+                      </div>
+                    </div>
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-5">
+        <div class="card">
+          <div class="card-header">Admin Activity</div>
+          <ul class="list-group list-group-flush small">
+            {% for l in logs %}
+            <li class="list-group-item d-flex justify-content-between align-items-center">
+              <span>{{ l.created_at }} — {{ l.action }}</span>
+              <code>{{ l.target }}</code>
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+  <div class="modal fade" id="broadcastPreview" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title">Preview Broadcast</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body">
+          <pre id="previewContent" class="mb-0"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    const previewModal = document.getElementById('broadcastPreview');
+    previewModal.addEventListener('show.bs.modal', function () {
+      const txt = document.getElementById('broadcastText').value || '';
+      document.getElementById('previewContent').textContent = txt;
+    });
+  </script>
+</body>
+</html>
+{% endif %}

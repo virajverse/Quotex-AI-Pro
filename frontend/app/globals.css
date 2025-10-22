@@ -1,0 +1,16 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body { @apply bg-bg text-primary; }
+
+.card { @apply bg-card rounded-xl shadow-card border border-gray-100; }
+.card-header { @apply px-5 py-4 border-b border-gray-100 font-medium; }
+.card-body { @apply p-5; }
+.nav-link { @apply flex items-center gap-3 px-4 py-2 rounded-lg text-sm text-muted hover:text-primary hover:bg-white transition; }
+.nav-link-active { @apply bg-white text-primary shadow-sm; }
+.topbar { @apply flex items-center justify-between p-4; }

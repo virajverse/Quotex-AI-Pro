@@ -3,6 +3,7 @@ import os
 import sqlite3
 import time
 import logging
+import socket
 from urllib.parse import urlparse, parse_qs, unquote
 from datetime import datetime, timedelta, date
 from typing import Optional
@@ -12,6 +13,27 @@ try:
 except Exception:  # psycopg2 is optional; only needed when DATABASE_URL is set
     psycopg2 = None
     pg_extras = None
+
+
+def get_ipv4_address(hostname: str) -> str:
+    """Resolve the first IPv4 address for hostname. If none found, return the original hostname.
+    Logs any resolution errors via the 'database' logger.
+    """
+    logger = logging.getLogger("database")
+    try:
+        # family=AF_INET filters IPv4
+        infos = socket.getaddrinfo(hostname, None, family=socket.AF_INET)
+        for info in infos:
+            try:
+                addr = info[4][0]
+                if addr:
+                    return addr
+            except Exception:
+                continue
+        logger.warning(f"No IPv4 A-record found for {hostname}; using hostname fallback")
+    except Exception as e:
+        logger.error(f"IPv4 resolution failed for {hostname}: {e}")
+    return hostname
 
 
 class Database:
@@ -37,16 +59,21 @@ class Database:
                 raise RuntimeError("psycopg2 is required for Postgres but is not installed")
             # Parse DATABASE_URL and build connection kwargs
             parsed = urlparse(self.pg_url)
-            host = parsed.hostname
+            host = parsed.hostname or "localhost"
             port = parsed.port or 5432
             dbname = (parsed.path or "/postgres").lstrip("/")
             user = unquote(parsed.username) if parsed.username else None
             password = unquote(parsed.password) if parsed.password else None
             q = parse_qs(parsed.query)
-            sslmode = (q.get("sslmode", ["require"]))[0]
-            # Force using hostname (no hostaddr) so libpq resolves; IPv4-only hosts like Render will reach IPv4
+            # Force sslmode=require for hosted Supabase unless explicitly set in URL
+            sslmode = (q.get("sslmode", ["require"]))[0] or "require"
+            # Resolve to IPv4 address explicitly to avoid IPv6-only endpoints on Render free tier
+            ipv4_host = get_ipv4_address(host)
+            if ipv4_host != host:
+                self.logger.info(f"DNS IPv4 resolution: {host} -> {ipv4_host}")
+            # Use 'host' (not hostaddr) with IPv4 string to keep libpq behavior while forcing IPv4 path
             kwargs = {
-                "host": host,
+                "host": ipv4_host,
                 "port": port,
                 "dbname": dbname,
                 "user": user,

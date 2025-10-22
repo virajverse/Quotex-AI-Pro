@@ -17,10 +17,10 @@ def get_ipv4_address(hostname: str) -> str:
 
 class Database:
     def __init__(self, path: str = None):
-        # Require Supabase Connection Pooler URL
+        # Require Supabase Service Role Postgres URL (port 5432)
         self.pg_url = (os.getenv("DATABASE_URL", "") or "").strip()
         if not self.pg_url:
-            raise RuntimeError("DATABASE_URL is required and must point to the Supabase Connection Pooler (port 6543)")
+            raise RuntimeError("DATABASE_URL is required and must be the Supabase Service Role Postgres URL (port 5432)")
         self.is_pg = True
         self.path = path or os.getenv("DATABASE_PATH", "data.db")
         self._init_db()
@@ -36,10 +36,10 @@ class Database:
         if self.is_pg:
             if psycopg2 is None:
                 raise RuntimeError("psycopg2 is required for Postgres but is not installed")
-            # Parse DATABASE_URL and build connection kwargs for Supabase Pooler (IPv4)
+            # Parse DATABASE_URL and build connection kwargs for Supabase (Service Role)
             parsed = urlparse(self.pg_url)
             host = parsed.hostname or "localhost"
-            port = parsed.port or 6543
+            port = parsed.port or 5432
             dbname = (parsed.path or "/postgres").lstrip("/")
             user = unquote(parsed.username) if parsed.username else None
             password = unquote(parsed.password) if parsed.password else None
@@ -55,10 +55,15 @@ class Database:
                 "connect_timeout": 10,
                 "application_name": "QuotexAI Pro",
             }
-            return psycopg2.connect(**kwargs)
-        conn = sqlite3.connect(self.path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        return conn
+            try:
+                return psycopg2.connect(**kwargs)
+            except Exception as e:
+                # Never log credentials
+                safe = f"host={host} port={port} dbname={dbname} sslmode={sslmode}"
+                logging.getLogger("database").error(f"Postgres connection failed: {safe} :: {e}")
+                raise
+        # Should never reach here; DATABASE_URL is required
+        raise RuntimeError("DATABASE_URL is required")
 
     def _init_db(self):
         if self.is_pg:
@@ -291,6 +296,50 @@ class Database:
     def get_user(self, telegram_id: int):
         return self.get_user_by_telegram(telegram_id)
 
+    # New API: set_premium(telegram_id, days=30)
+    def set_premium(self, telegram_id: int, days: int = 30):
+        """Set premium active and extend expiry by given days from now or current expiry, whichever is later."""
+        now = datetime.utcnow()
+        with self._connect() as conn:
+            cur = self._execute(conn, "SELECT expires_at FROM users WHERE telegram_id=?", (telegram_id,))
+            row = cur.fetchone()
+            current_expiry = now
+            if row:
+                try:
+                    val = dict(row).get("expires_at")
+                    if isinstance(val, date):
+                        current_expiry = datetime.combine(val, datetime.min.time())
+                    elif isinstance(val, str):
+                        current_expiry = datetime.fromisoformat(val)
+                except Exception:
+                    current_expiry = now
+            base = current_expiry if current_expiry > now else now
+            new_expiry = base + timedelta(days=days)
+            self._execute(
+                conn,
+                "UPDATE users SET is_premium=?, expires_at=? WHERE telegram_id=?",
+                (True, new_expiry.date(), telegram_id),
+            )
+            conn.commit()
+
+    def add_pending_verification(self, telegram_id: int, v_type: str, data: str):
+        with self._connect() as conn:
+            self._execute(
+                conn,
+                "INSERT INTO pending_verifications (telegram_id, type, data) VALUES (?, ?, ?)",
+                (telegram_id, v_type, data),
+            )
+            conn.commit()
+
+    def get_pending_verifications(self):
+        with self._connect() as conn:
+            cur = self._execute(
+                conn,
+                "SELECT id, telegram_id, type, data, timestamp FROM pending_verifications",
+                (),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
     def search_users(self, q: str, limit: int = 200):
         like = f"%{q}%"
         with self._connect() as conn:
@@ -497,17 +546,6 @@ class Database:
                 (limit,),
             )
             return [dict(r) for r in cur.fetchall()]
-
-    def add_pending_verification(self, telegram_id: int, vtype: str, data: str):
-        if vtype not in ("upi", "usdt"):
-            raise ValueError("invalid verification type")
-        with self._connect() as conn:
-            self._execute(
-                conn,
-                "INSERT INTO pending_verifications (telegram_id, type, data) VALUES (?, ?, ?)",
-                (telegram_id, vtype, data),
-            )
-            conn.commit()
 
     def list_pending_verifications_by_type(self, vtype: str, limit: int = 50):
         if vtype not in ("upi", "usdt"):

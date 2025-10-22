@@ -1,9 +1,6 @@
 import json
 import os
-import sqlite3
-import time
 import logging
-import socket
 from urllib.parse import urlparse, parse_qs, unquote
 from datetime import datetime, timedelta, date
 from typing import Optional
@@ -14,55 +11,18 @@ except Exception:  # psycopg2 is optional; only needed when DATABASE_URL is set
     psycopg2 = None
     pg_extras = None
 
-try:
-    import dns.resolver as dnsresolver  # type: ignore
-except Exception:
-    dnsresolver = None
-
-
 def get_ipv4_address(hostname: str) -> str:
-    """Resolve the first IPv4 address for hostname. If none found, return the original hostname.
-    Logs any resolution errors via the 'database' logger.
-    """
-    logger = logging.getLogger("database")
-    try:
-        # family=AF_INET filters IPv4
-        infos = socket.getaddrinfo(hostname, None, family=socket.AF_INET)
-        for info in infos:
-            try:
-                addr = info[4][0]
-                if addr:
-                    return addr
-            except Exception:
-                continue
-        logger.warning(f"No IPv4 A-record found for {hostname}; using hostname fallback")
-    except Exception as e:
-        logger.error(f"IPv4 resolution failed for {hostname}: {e}")
-    if dnsresolver is not None:
-        try:
-            r = dnsresolver.Resolver()
-            r.timeout = 2.0
-            r.lifetime = 2.0
-            r.nameservers = ["1.1.1.1", "8.8.8.8"]
-            answers = r.resolve(hostname, "A")
-            for ans in answers:
-                ip = ans.to_text()
-                if ip:
-                    return ip
-        except Exception as e:
-            logger.error(f"dnspython IPv4 resolution failed for {hostname}: {e}")
     return hostname
 
 
 class Database:
     def __init__(self, path: str = None):
-        # Prefer Postgres if DATABASE_URL is provided; fallback to SQLite
+        # Require Supabase Connection Pooler URL
         self.pg_url = (os.getenv("DATABASE_URL", "") or "").strip()
-        self.is_pg = bool(self.pg_url.startswith("postgres"))
-        self.pg_pooler_url = (os.getenv("DATABASE_URL_POOLER", "") or "").strip()
+        if not self.pg_url:
+            raise RuntimeError("DATABASE_URL is required and must point to the Supabase Connection Pooler (port 6543)")
+        self.is_pg = True
         self.path = path or os.getenv("DATABASE_PATH", "data.db")
-        if not self.is_pg:
-            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         self._init_db()
         self.logger = logging.getLogger("database")
         if not self.logger.handlers:
@@ -76,21 +36,15 @@ class Database:
         if self.is_pg:
             if psycopg2 is None:
                 raise RuntimeError("psycopg2 is required for Postgres but is not installed")
-            # Parse DATABASE_URL and build connection kwargs
+            # Parse DATABASE_URL and build connection kwargs for Supabase Pooler (IPv4)
             parsed = urlparse(self.pg_url)
             host = parsed.hostname or "localhost"
-            port = parsed.port or 5432
+            port = parsed.port or 6543
             dbname = (parsed.path or "/postgres").lstrip("/")
             user = unquote(parsed.username) if parsed.username else None
             password = unquote(parsed.password) if parsed.password else None
             q = parse_qs(parsed.query)
-            # Force sslmode=require for hosted Supabase unless explicitly set in URL
             sslmode = (q.get("sslmode", ["require"]))[0] or "require"
-            # Resolve to IPv4 address explicitly to avoid IPv6-only endpoints on Render free tier
-            ipv4_host = get_ipv4_address(host)
-            if ipv4_host != host:
-                self.logger.info(f"DNS IPv4 resolution: {host} -> {ipv4_host}")
-            # Use 'host' as hostname and 'hostaddr' as IPv4 to force IPv4 while keeping TLS hostname
             kwargs = {
                 "host": host,
                 "port": port,
@@ -101,54 +55,7 @@ class Database:
                 "connect_timeout": 10,
                 "application_name": "QuotexAI Pro",
             }
-            if ipv4_host and ipv4_host != host:
-                kwargs["hostaddr"] = ipv4_host
-            # Retry logic: 1 initial + 2 retries
-            last_err = None
-            for attempt in range(3):
-                try:
-                    return psycopg2.connect(**kwargs)
-                except psycopg2.OperationalError as e:
-                    last_err = e
-                    self.logger.error(f"Postgres connect failed (attempt {attempt+1}/3): {e}")
-                    if attempt < 2:
-                        time.sleep(2)
-                        continue
-            # Pooler fallback if provided
-            if self.pg_pooler_url:
-                parsed_p = urlparse(self.pg_pooler_url)
-                host_p = parsed_p.hostname or host
-                port_p = parsed_p.port or 6543
-                dbname_p = (parsed_p.path or f"/{dbname}").lstrip("/")
-                user_p = unquote(parsed_p.username) if parsed_p.username else user
-                password_p = unquote(parsed_p.password) if parsed_p.password else password
-                qp = parse_qs(parsed_p.query)
-                sslmode_p = (qp.get("sslmode", [sslmode]))[0] or sslmode
-                ipv4_host_p = get_ipv4_address(host_p)
-                if ipv4_host_p != host_p:
-                    self.logger.info(f"DNS IPv4 resolution (pooler): {host_p} -> {ipv4_host_p}")
-                kwargs_p = {
-                    "host": host_p,
-                    "port": port_p,
-                    "dbname": dbname_p,
-                    "user": user_p,
-                    "password": password_p,
-                    "sslmode": sslmode_p,
-                    "connect_timeout": 10,
-                    "application_name": "QuotexAI Pro",
-                }
-                if ipv4_host_p and ipv4_host_p != host_p:
-                    kwargs_p["hostaddr"] = ipv4_host_p
-                for attempt in range(3):
-                    try:
-                        return psycopg2.connect(**kwargs_p)
-                    except psycopg2.OperationalError as e:
-                        self.logger.error(f"Postgres pooler connect failed (attempt {attempt+1}/3): {e}")
-                        if attempt < 2:
-                            time.sleep(2)
-                            continue
-                        raise
-            raise last_err
+            return psycopg2.connect(**kwargs)
         conn = sqlite3.connect(self.path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         return conn

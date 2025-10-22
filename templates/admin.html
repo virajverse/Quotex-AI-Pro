@@ -34,6 +34,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="{{ url_for('static', filename='style.css') }}" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <title>Admin — QuotexAI Pro</title>
 </head>
 <body>
@@ -44,7 +45,20 @@
     </div>
   </nav>
 
-  <div class="container my-4">
+  <div class="container-fluid">
+    <div class="row">
+      <aside class="col-12 col-lg-2 sidebar d-none d-lg-block">
+        <div class="fs-6 text-uppercase text-secondary mb-2">Navigation</div>
+        <nav class="nav flex-column gap-1">
+          <a class="nav-link" href="#top">🏠 Dashboard</a>
+          <a class="nav-link" href="#broadcast">📣 Broadcast</a>
+          <a class="nav-link" href="#users">👥 Users</a>
+          <a class="nav-link" href="#logs">📝 Logs</a>
+          <a class="nav-link" href="{{ url_for('admin.logout') }}">🚪 Logout</a>
+        </nav>
+      </aside>
+
+      <main class="col-12 col-lg-10 py-3 px-3" id="top">
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
         {% for category, message in messages %}
@@ -52,12 +66,28 @@
         {% endfor %}
       {% endif %}
     {% endwith %}
+    <script id="admin-data" type="application/json">{{ {'stats': stats, 'logs': logs}|tojson }}</script>
 
     <div class="row g-3 mb-2">
       <div class="col-6 col-md-3"><div class="card stat"><div class="card-body"><div class="small text-muted">Total Users</div><div class="h4">{{ stats.total_users }}</div></div></div></div>
       <div class="col-6 col-md-3"><div class="card stat"><div class="card-body"><div class="small text-muted">Active Premium</div><div class="h4">{{ stats.active_premium }}</div></div></div></div>
       <div class="col-6 col-md-3"><div class="card stat"><div class="card-body"><div class="small text-muted">Today's New</div><div class="h4">{{ stats.new_signups_today }}</div></div></div></div>
       <div class="col-6 col-md-3"><div class="card stat"><div class="card-body"><div class="small text-muted">Signal Success</div><div class="h4">N/A</div></div></div></div>
+    </div>
+
+    <div class="row g-3 mb-3">
+      <div class="col-lg-6">
+        <div class="card h-100">
+          <div class="card-header">Premium Distribution</div>
+          <div class="card-body"><canvas id="chartPremium"></canvas></div>
+        </div>
+      </div>
+      <div class="col-lg-6">
+        <div class="card h-100">
+          <div class="card-header">Admin Actions (recent)</div>
+          <div class="card-body"><canvas id="chartActions"></canvas></div>
+        </div>
+      </div>
     </div>
 
     <div class="card my-3">
@@ -98,7 +128,7 @@
       </div>
     </div>
 
-    <div class="card my-3">
+    <div class="card my-3" id="broadcast">
       <div class="card-header">📣 Broadcast to Premium Users</div>
       <div class="card-body">
         <form method="post" action="{{ url_for('admin.broadcast') }}">
@@ -112,7 +142,7 @@
     </div>
 
     <div class="row g-3">
-      <div class="col-lg-7">
+      <div class="col-lg-7" id="users">
         <div class="card">
           <div class="card-header">USERS TABLE</div>
           <div class="table-responsive">
@@ -174,7 +204,7 @@
         </div>
       </div>
 
-      <div class="col-lg-5">
+      <div class="col-lg-5" id="logs">
         <div class="card">
           <div class="card-header">Admin Activity</div>
           <ul class="list-group list-group-flush small">
@@ -189,6 +219,8 @@
       </div>
     </div>
 
+      </main>
+    </div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
@@ -208,6 +240,41 @@
       const txt = document.getElementById('broadcastText').value || '';
       document.getElementById('previewContent').textContent = txt;
     });
+
+    // Charts
+    let adminData = { stats: { total_users: 0, active_premium: 0 }, logs: [] };
+    try {
+      const el = document.getElementById('admin-data');
+      if (el && el.textContent) adminData = JSON.parse(el.textContent);
+    } catch (e) {}
+    const totalUsers = Number(adminData.stats.total_users || 0);
+    const activePremium = Number(adminData.stats.active_premium || 0);
+    const otherUsers = Math.max(totalUsers - activePremium, 0);
+    const ctxPremium = document.getElementById('chartPremium');
+    if (ctxPremium) {
+      new Chart(ctxPremium, {
+        type: 'doughnut',
+        data: {
+          labels: ['Premium Active', 'Others'],
+          datasets: [{ data: [activePremium, otherUsers], backgroundColor: ['#0d6efd', '#e5e7eb'] }]
+        },
+        options: { plugins: { legend: { position: 'bottom' } } }
+      });
+    }
+
+    const logsData = adminData.logs || [];
+    const counts = {};
+    for (const l of logsData) { counts[l.action] = (counts[l.action] || 0) + 1; }
+    const labels = Object.keys(counts);
+    const values = labels.map(k => counts[k]);
+    const ctxActions = document.getElementById('chartActions');
+    if (ctxActions) {
+      new Chart(ctxActions, {
+        type: 'bar',
+        data: { labels, datasets: [{ label: 'Count', data: values, backgroundColor: '#22c55e' }] },
+        options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+      });
+    }
   </script>
 </body>
 </html>

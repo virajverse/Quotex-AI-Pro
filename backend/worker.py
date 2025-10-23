@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timedelta, date
 from dotenv import load_dotenv
 import telebot
+import requests
 
 # Allow importing modules from repo root when Render root directory is backend/
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -110,6 +111,10 @@ def main():
     UPI_ID = os.getenv("UPI_ID", "")
     USDT_TRC20_ADDRESS = os.getenv("USDT_TRC20_ADDRESS", "")
     EVM_ADDRESS = os.getenv("EVM_ADDRESS", "")
+    TRONGRID_API_KEY = os.getenv("TRONGRID_API_KEY", "")
+    ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
+    BSCSCAN_API_KEY = os.getenv("BSCSCAN_API_KEY", "")
+    POLYGONSCAN_API_KEY = os.getenv("POLYGONSCAN_API_KEY", "")
 
     @bot.message_handler(commands=["premium"]) 
     def cmd_premium(message):
@@ -145,14 +150,76 @@ def main():
         txh = m.group(1)
         try:
             db.add_pending_verification(message.from_user.id, "usdt", txh)
-            bot.reply_to(message, "USDT verification submitted. We'll review and grant access soon.")
+            auto_note = ""
+            try:
+                ok, details = auto_verify_usdt(txh, USDT_TRC20_ADDRESS, EVM_ADDRESS, TRONGRID_API_KEY, ETHERSCAN_API_KEY, BSCSCAN_API_KEY, POLYGONSCAN_API_KEY)
+                if ok:
+                    db.admin_log("worker", "auto_usdt_ok", f"{message.from_user.id}:{details}")
+                    auto_note = " Auto-check passed."
+                elif details:
+                    db.admin_log("worker", "auto_usdt_fail", f"{message.from_user.id}:{details}")
+            except Exception as e:
+                try:
+                    db.admin_log("worker", "auto_usdt_error", str(e))
+                except Exception:
+                    pass
+            bot.reply_to(message, "USDT verification submitted." + auto_note)
         except Exception as e:
             bot.reply_to(message, f"Error: {e}")
 
     t = threading.Thread(target=scheduler_loop, daemon=True)
     t.start()
     # Long polling
-    bot.infinity_polling(skip_pending=True, allowed_updates=["message"], long_polling_timeout=30)
+    poll_timeout = int(os.getenv("POLL_INTERVAL_SECONDS") or 30)
+    bot.infinity_polling(skip_pending=True, allowed_updates=["message"], long_polling_timeout=poll_timeout)
+
+
+def auto_verify_usdt(txh, tron_dest, evm_dest, tron_key, eth_key, bsc_key, polygon_key):
+    try:
+        if tron_key and tron_dest:
+            h = {"TRON-PRO-API-KEY": tron_key}
+            r = requests.get(f"https://api.trongrid.io/v1/transactions/{txh}/events", headers=h, timeout=15)
+            if r.ok:
+                data = r.json()
+                for ev in data.get("data", []):
+                    if ev.get("event_name") == "Transfer":
+                        res = ev.get("result") or {}
+                        to = (res.get("to") or "").lower()
+                        if to and to == tron_dest.lower():
+                            val = res.get("value") or ""
+                            return True, f"tron:{to}:{val}"
+        if evm_dest and (eth_key or bsc_key or polygon_key):
+            chains = []
+            if eth_key:
+                chains.append(("eth", "https://api.etherscan.io/api", eth_key, "0xdAC17F958D2ee523a2206206994597C13D831ec7"))
+            if bsc_key:
+                chains.append(("bsc", "https://api.bscscan.com/api", bsc_key, "0x55d398326f99059fF775485246999027B3197955"))
+            if polygon_key:
+                chains.append(("polygon", "https://api.polygonscan.com/api", polygon_key, "0xC2132D05D31c914a87C6611C10748AEb04B58e8f"))
+            for name, base, key, usdt in chains:
+                params = {
+                    "module": "account",
+                    "action": "tokentx",
+                    "address": evm_dest,
+                    "contractaddress": usdt,
+                    "page": 1,
+                    "offset": 20,
+                    "sort": "desc",
+                    "apikey": key,
+                }
+                r = requests.get(base, params=params, timeout=15)
+                if not r.ok:
+                    continue
+                result = (r.json() or {}).get("result") or []
+                for tx in result:
+                    if (tx.get("hash") or "").lower() == txh.lower():
+                        to = (tx.get("to") or "").lower()
+                        if to == evm_dest.lower():
+                            val = tx.get("value") or ""
+                            return True, f"{name}:{to}:{val}"
+        return False, ""
+    except Exception as e:
+        return False, f"err:{e}"
 
 
 if __name__ == "__main__":

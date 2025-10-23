@@ -1,0 +1,8 @@
+Flask==3.0.3
+Flask-Cors==4.0.0
+pyTelegramBotAPI==4.23.0
+python-dotenv==1.0.1
+psycopg2-binary==2.9.9
+requests==2.32.3
+gunicorn==21.2.0
+tzdata==2024.1

@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Users</h2>
+<div class="card">
+  <form method="get" action="/admin/users">
+    <div class="row">
+      <div class="col">
+        <input name="q" value="{{ q }}" placeholder="Search by @username, tg:<id>, ident, or telegram id">
+      </div>
+      <div class="col" style="max-width:200px">
+        <button class="btn" type="submit">Search</button>
+      </div>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Telegram</th>
+        <th>Ident / Username</th>
+        <th>Premium</th>
+        <th>Signals</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for u in items %}
+      <tr>
+        <td>{{ u.id }}</td>
+        <td>{{ u.telegram_id }}</td>
+        <td>
+          <div>{{ u.ident }}</div>
+          <div class="muted">@{{ u.username or '' }}</div>
+        </td>
+        <td>
+          {% if u.premium_active %}
+            <span style="color:#22c55e">Active</span>
+            <div class="muted">{{ u.premium_expires_at }}</div>
+          {% else %}
+            <span style="color:#ef4444">Inactive</span>
+          {% endif %}
+        </td>
+        <td>
+          <div>Daily: {{ u.signal_used_today or 0 }}/{{ u.signal_daily_limit or 0 }}</div>
+          <div>Credits: {{ u.signal_credits or 0 }}</div>
+        </td>
+        <td>
+          <form class="inline" method="post" action="/admin/grant">
+            <input type="hidden" name="ident" value="{{ u.ident }}">
+            <input name="days" placeholder="days" style="max-width:80px">
+            <button class="btn ok" type="submit">Grant</button>
+          </form>
+          <form class="inline" method="post" action="/admin/revoke" onsubmit="return confirm('Revoke premium?')">
+            <input type="hidden" name="ident" value="{{ u.ident }}">
+            <button class="btn bad" type="submit">Revoke</button>
+          </form>
+          <details>
+            <summary class="muted">Message</summary>
+            <form method="post" action="/admin/message" style="margin-top:8px">
+              <input type="hidden" name="ident" value="{{ u.ident }}">
+              <textarea name="text" rows="2" placeholder="Your message..."></textarea>
+              <div style="margin-top:8px"><button class="btn" type="submit">Send</button></div>
+            </form>
+          </details>
+          <details>
+            <summary class="muted">Signals</summary>
+            <form class="inline" method="post" action="/admin/add_credits" style="margin-top:8px">
+              <input type="hidden" name="ident" value="{{ u.ident }}">
+              <input name="count" placeholder="credits +/-" style="max-width:100px">
+              <button class="btn" type="submit">Update Credits</button>
+            </form>
+            <form class="inline" method="post" action="/admin/set_limit" style="margin-top:8px">
+              <input type="hidden" name="ident" value="{{ u.ident }}">
+              <input name="limit" placeholder="daily limit" style="max-width:100px">
+              <button class="btn" type="submit">Set Limit</button>
+            </form>
+          </details>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

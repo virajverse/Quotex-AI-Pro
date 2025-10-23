@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Dashboard</h2>
+<div class="row">
+  <div class="col">
+    <div class="card">
+      <div class="muted">Total Users</div>
+      <div style="font-size:28px; font-weight:700">{{ stats.total_users }}</div>
+    </div>
+  </div>
+  <div class="col">
+    <div class="card">
+      <div class="muted">Active Premium</div>
+      <div style="font-size:28px; font-weight:700">{{ stats.active_premium }}</div>
+    </div>
+  </div>
+  <div class="col">
+    <div class="card">
+      <div class="muted">Expiring 1d</div>
+      <div style="font-size:28px; font-weight:700">{{ stats.expiring_1d }}</div>
+    </div>
+  </div>
+  <div class="col">
+    <div class="card">
+      <div class="muted">Expiring 3d</div>
+      <div style="font-size:28px; font-weight:700">{{ stats.expiring_3d }}</div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h3>Cron</h3>
+  <form action="/admin/cron" method="post">
+    <button class="btn ok" type="submit">Run cron now</button>
+    <span class="muted">(idempotent)</span>
+  </form>
+</div>
+{% endblock %}

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Broadcast</h2>
+<div class="card" style="max-width:720px">
+  <form method="post" action="/admin/broadcast">
+    <label>Message</label>
+    <textarea name="text" rows="5" placeholder="Your broadcast message..."></textarea>
+    <label style="display:flex; gap:8px; align-items:center; margin-top:8px">
+      <input type="checkbox" name="premium_only" value="1"> Premium users only
+    </label>
+    <div style="margin-top:8px">
+      <button class="btn ok" type="submit">Send broadcast</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

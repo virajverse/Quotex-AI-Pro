@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card" style="max-width:420px;margin:48px auto;">
+  <h2>Admin Login</h2>
+  <p class="muted">Enter your admin key to access the panel.</p>
+  <form method="post">
+    <label for="key">Admin Key</label>
+    <input id="key" name="key" type="password" autocomplete="current-password" placeholder="••••••••" required>
+    <div style="margin-top:12px">
+      <button class="btn ok" type="submit">Login</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

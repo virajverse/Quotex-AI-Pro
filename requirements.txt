@@ -1,6 +1,0 @@
-Flask>=3.0.0
-pyTelegramBotAPI>=4.14.0
-python-dotenv>=1.0.1
-requests>=2.32.0
-psycopg2-binary>=2.9.9
-Flask-Cors>=5.0.0

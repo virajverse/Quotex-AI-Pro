@@ -10,15 +10,20 @@ if (!ADMIN_API_KEY) {
 
 async function forward(path, init = {}) {
   if (!BACKEND_URL || !ADMIN_API_KEY) {
-    return new Response(JSON.stringify({ error: 'server not configured' }), { status: 500 });
+    return new Response(JSON.stringify({ error: 'server not configured' }), { status: 500, headers: { 'content-type': 'application/json' } });
   }
-  const url = new URL(path, BACKEND_URL);
-  const headers = new Headers(init.headers || {});
-  headers.set('x-admin-key', ADMIN_API_KEY);
-  if (!headers.has('content-type') && init.body) headers.set('content-type', 'application/json');
-  const res = await fetch(url.toString(), { ...init, headers, cache: 'no-store' });
-  const text = await res.text();
-  return new Response(text, { status: res.status, headers: { 'content-type': res.headers.get('content-type') || 'application/json' } });
+  try {
+    const url = new URL(path, BACKEND_URL);
+    const headers = new Headers(init.headers || {});
+    headers.set('x-admin-key', ADMIN_API_KEY);
+    if (!headers.has('content-type') && init.body) headers.set('content-type', 'application/json');
+    const res = await fetch(url.toString(), { ...init, headers, cache: 'no-store' });
+    const text = await res.text();
+    return new Response(text, { status: res.status, headers: { 'content-type': res.headers.get('content-type') || 'application/json' } });
+  } catch (err) {
+    const payload = { error: 'upstream_unreachable', detail: (err && err.message) ? err.message : String(err) };
+    return new Response(JSON.stringify(payload), { status: 502, headers: { 'content-type': 'application/json' } });
+  }
 }
 
 export async function get(path) {

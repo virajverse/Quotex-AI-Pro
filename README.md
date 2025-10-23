@@ -1,3 +1,160 @@
+# QuotexAI Pro — Full Stack Overview (2025)
+
+This repo is a monorepo with a Python backend (Flask API + Telegram worker) and a Next.js admin frontend. It is wired for Supabase Postgres and cloud deploy on Render (backend) + Vercel (frontend).
+
+---
+
+## Architecture (Current)
+
+```mermaid
+flowchart TD
+  subgraph Backend [Backend]
+    A[backend/app.py \n Flask REST API]
+    W[backend/worker.py \n Telegram Bot + Scheduler]
+    DB[(Supabase Postgres)]
+  end
+  subgraph Frontend [Frontend]
+    F[Next.js Admin Panel]
+  end
+  F -- x-admin-key --> A
+  A <-- read/write --> DB
+  W <-- read/write --> DB
+  TG[Telegram Users] -- long polling --> W
+```
+
+### Backend
+- `backend/app.py`
+  - Endpoints: `/health`, `/health/db`, `/api/stats`, `/api/users`, `/api/grant`, `/api/revoke`, `/api/message`, `/api/broadcast`, `/api/cron`.
+  - CORS controlled by `FRONTEND_ORIGIN`.
+- `backend/worker.py`
+  - Long polling bot with commands: `/start`, `/help`, `/id`, `/status`, `/premium`, `/verify_upi <txn>`, `/verify_usdt <txhash>`.
+  - On start: clears Telegram webhook to avoid conflicts.
+  - Scheduler loop (hourly by default) sends expiry reminders and marks expired.
+  - Optional auto‑verification for USDT via TronGrid/Etherscan/BscScan/Polygon if API keys are set.
+- `backend/database.py`
+  - Connects to Supabase Postgres via `DATABASE_URL` (Service Role, port 5432, `sslmode=require`).
+
+### Frontend (Next.js)
+- `frontend/` Next.js App Router + Tailwind.
+- Server routes in `frontend/app/api/*` proxy to the backend using server envs (`BACKEND_URL`, `ADMIN_API_KEY`).
+- Pages: `/` dashboard, `/users`, `/messages`, `/broadcast`.
+
+---
+
+## Environment Variables Matrix
+
+### Render Web Service (runs `backend/app.py`)
+- `DATABASE_URL` = `postgresql://postgres:<SERVICE_ROLE_KEY>@db.<project>.supabase.co:5432/postgres?sslmode=require`
+- `ADMIN_API_KEY` = strong secret used by admin endpoints and cron
+- `FRONTEND_ORIGIN` = `https://<your-vercel-domain>`
+- `BOT_TOKEN` = Telegram token (required for `/api/message` and `/api/broadcast`)
+
+### Render Background Worker (runs `backend/worker.py`)
+- Required: `DATABASE_URL`, `BOT_TOKEN`
+- Payments (shown in `/premium`): `UPI_ID`, `USDT_TRC20_ADDRESS`, `EVM_ADDRESS`
+- Auto‑verification (optional): `TRONGRID_API_KEY`, `ETHERSCAN_API_KEY`, `BSCSCAN_API_KEY`, `POLYGONSCAN_API_KEY`
+- Tuning (optional): `POLL_INTERVAL_SECONDS` (default 30), `SCHEDULER_INTERVAL_SECONDS` (default 3600)
+
+### Vercel (Next.js frontend)
+- `BACKEND_URL` = Render Web base URL
+- `ADMIN_API_KEY` = same as Render Web (server‑side only)
+
+### Local `.env` (repo root)
+```env
+DATABASE_URL=postgresql://postgres:<encoded-service-role-key>@db.<project>.supabase.co:5432/postgres?sslmode=require
+BOT_TOKEN=123:abc
+ADMIN_API_KEY=dev-key
+FRONTEND_ORIGIN=http://localhost:3000
+UPI_ID=yourname@oksbi
+USDT_TRC20_ADDRESS=Txxxxxxxxxxxxxxxxxxxxxxxxxx
+EVM_ADDRESS=0xYourEvmAddress
+```
+
+---
+
+## Local Development
+
+```powershell
+# In repo root
+py -m venv .venv
+./.venv/Scripts/Activate.ps1
+pip install -r requirements.txt
+
+# Web API
+$env:DATABASE_URL="postgresql://...:5432/postgres?sslmode=require"
+$env:ADMIN_API_KEY="dev-key"
+$env:FRONTEND_ORIGIN="http://localhost:3000"
+$env:BOT_TOKEN="123:abc"
+py backend/app.py
+
+# Worker (in a second terminal)
+$env:DATABASE_URL="postgresql://...:5432/postgres?sslmode=require"
+$env:BOT_TOKEN="123:abc"
+py backend/worker.py
+
+# Frontend (optional)
+cd frontend
+npm install
+$env:BACKEND_URL="http://127.0.0.1:5000"
+$env:ADMIN_API_KEY="dev-key"
+npm run dev
+```
+
+---
+
+## Deploy
+
+### Render — Web Service (backend API)
+- Root Directory: `backend/`
+- Build Command: `pip install -r ../requirements.txt`
+- Start Command: `python app.py`
+- Watch Paths: `/backend/**`
+- Set envs: `DATABASE_URL`, `ADMIN_API_KEY`, `FRONTEND_ORIGIN`, `BOT_TOKEN`
+- Health: `/health`, `/health/db`
+
+### Render — Background Worker (bot)
+- Root Directory: `backend/`
+- Build Command: `pip install -r ../requirements.txt`
+- Start Command: `python worker.py`
+- Watch Paths: `/backend/**`
+- Set envs: `DATABASE_URL`, `BOT_TOKEN`, and optional payment/auto‑verify keys
+
+### Cron / Reminders
+- Use UptimeRobot or Render Cron to POST:
+  `https://<render-web>/api/cron?key=<ADMIN_API_KEY>` every 5 minutes.
+
+### Vercel — Next.js Admin
+- Project root: `frontend/`
+- Env: `BACKEND_URL`, `ADMIN_API_KEY` (server‑side)
+- Deploy; visit `/`, `/users`, `/messages`, `/broadcast`.
+
+---
+
+## Troubleshooting
+- **Webhook conflict**: if you see "can't use getUpdates while webhook is active", the worker calls `bot.delete_webhook(drop_pending_updates=True)` at startup.
+- **DB connect error**: ensure Service Role Postgres URL (not pooler), port 5432, include `sslmode=require`, URL‑encode special chars.
+- **401 from admin API**: mismatch `ADMIN_API_KEY` between Vercel and Render.
+- **Multiple bot instances**: run only one polling worker per bot token.
+
+---
+
+## Repository Structure
+```
+backend/
+  app.py            # Flask REST API
+  worker.py         # Telegram bot + scheduler
+  database.py       # Supabase Postgres access
+frontend/
+  app/              # Next.js pages and API routes (proxy)
+  lib/proxy.js      # Server-side proxy to backend with x-admin-key
+requirements.txt    # Python deps (Flask, telebot, requests, psycopg2, dotenv, CORS)
+supabase_schema.sql # Schema to run in Supabase SQL editor
+```
+
+---
+
+Below are legacy docs preserved for reference.
+
 # QuotexAI Pro — Trade Smarter, Not Harder ⚡
 
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)](#)

@@ -1,6 +1,7 @@
 import json
 import os
 import logging
+import socket
 from urllib.parse import urlparse, parse_qs, unquote
 from datetime import datetime, timedelta, date
 from typing import Optional
@@ -11,8 +12,16 @@ except Exception:  # psycopg2 is optional; only needed when DATABASE_URL is set
     psycopg2 = None
     pg_extras = None
 
-def get_ipv4_address(hostname: str) -> str:
-    return hostname
+def get_ipv4_address(hostname: str):
+    try:
+        infos = socket.getaddrinfo(hostname, None, socket.AF_INET)
+        for info in infos:
+            addr = info[4][0]
+            if addr:
+                return addr
+    except Exception:
+        return None
+    return None
 
 
 class Database:
@@ -55,6 +64,10 @@ class Database:
                 "connect_timeout": 10,
                 "application_name": "QuotexAI Pro",
             }
+            # Prefer IPv4 locally to avoid IPv6 'Network is unreachable' issues
+            ipv4 = get_ipv4_address(host)
+            if ipv4 and ipv4 != host:
+                kwargs["hostaddr"] = ipv4
             try:
                 return psycopg2.connect(**kwargs)
             except Exception as e:

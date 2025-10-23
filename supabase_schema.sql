@@ -65,8 +65,14 @@ CREATE TABLE IF NOT EXISTS pending_verifications (
 
 -- Helpful indexes for admin dashboards & automations
 CREATE INDEX IF NOT EXISTS idx_users_last_login ON users (last_login);
+-- Speed up expiry lookups used by reminders
+CREATE INDEX IF NOT EXISTS idx_users_premium_expiry ON users (is_premium, expires_at);
 CREATE INDEX IF NOT EXISTS idx_payment_logs_created ON payment_logs (created_at);
 CREATE INDEX IF NOT EXISTS idx_premium_queue_created ON premium_queue (created_at);
+-- Speed up has_sent_notice_today(action,target,date(created_at))
+CREATE INDEX IF NOT EXISTS idx_admin_logs_action_target_created ON admin_logs (action, target, created_at);
+-- Faster listing/filtering of pending verifications
+CREATE INDEX IF NOT EXISTS idx_pending_verifications_type_time ON pending_verifications (type, timestamp);
 
 -- Optional rollback helper: uncomment to drop everything (use with caution)
 -- DROP TABLE IF EXISTS pending_verifications;

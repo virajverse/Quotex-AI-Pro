@@ -1,5 +1,7 @@
 import os
 import logging
+import threading
+from datetime import datetime, timezone, timedelta
 from functools import wraps
 
 from flask import Flask, request, jsonify, render_template, redirect, url_for, session, flash
@@ -10,18 +12,42 @@ from telebot import types
 
 try:
     from dotenv import load_dotenv
+    # Load default .env
     load_dotenv()
+    # Also load .env.local if present (override values)
+    try:
+        load_dotenv(".env.local", override=True)
+    except Exception:
+        pass
 except Exception:
     pass
 
-from . import database as db
+# Dynamic DB backend: Postgres if DATABASE_URL set, else SQLite
 from . import utils
+try:
+    if os.getenv("DATABASE_URL", "").strip():
+        from . import database as db
+    else:
+        from . import sqlite_db as db
+except Exception:
+    from . import sqlite_db as db
+
+# Initialize/seed if available
+try:
+    if hasattr(db, 'init_db'):
+        db.init_db()
+    if hasattr(db, 'ensure_default_products'):
+        db.ensure_default_products()
+except Exception:
+    pass
 
 utils.setup_logger()
 logger = logging.getLogger("app")
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": os.getenv("FRONTEND_ORIGIN", "*")}})
+
+FREE_SAMPLES: dict[int, str] = {}
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
@@ -36,13 +62,36 @@ else:
     app.secret_key = os.urandom(24)
     logging.getLogger("app").warning("SECRET_KEY not set; using random key (sessions reset on restart)")
 
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", threaded=False, disable_web_page_preview=True) if BOT_TOKEN else None
-if bot and WEBHOOK_BASE_URL:
-    try:
-        bot.remove_webhook()
-        bot.set_webhook(url=f"{WEBHOOK_BASE_URL}/bot/{BOT_TOKEN}", drop_pending_updates=True)
-    except Exception:
-        logger.exception("Failed to set webhook")
+bot = telebot.TeleBot(
+    BOT_TOKEN,
+    parse_mode="HTML",
+    threaded=True,
+    disable_web_page_preview=True,
+    num_threads=int(os.getenv("BOT_THREADS", "4")) if hasattr(telebot, 'apihelper') or True else None,
+) if BOT_TOKEN else None
+if bot:
+    if WEBHOOK_BASE_URL:
+        try:
+            bot.remove_webhook()
+            bot.set_webhook(url=f"{WEBHOOK_BASE_URL}/bot/{BOT_TOKEN}", drop_pending_updates=True)
+        except Exception:
+            logger.exception("Failed to set webhook")
+    else:
+        # Ensure any old webhook is removed when running in polling mode
+        try:
+            bot.remove_webhook()
+        except Exception:
+            pass
+        # Local/dev: start background polling so inline buttons work without a public webhook
+        def _polling():
+            try:
+                bot.infinity_polling(skip_pending=True, timeout=10)
+            except Exception:
+                logger.exception("Polling failed")
+        try:
+            threading.Thread(target=_polling, name="bot-polling", daemon=True).start()
+        except Exception:
+            logger.exception("Failed to start polling thread")
 
 def require_admin(fn):
     @wraps(fn)
@@ -101,18 +150,32 @@ def admin_users():
 def admin_grant():
     ident = (request.form.get("ident") or "").strip()
     days = int(request.form.get("days") or 0)
-    if not ident or days <= 0:
-        flash("Provide ident and positive days", "warning")
+    credits = int(request.form.get("credits") or 0)
+    if not ident or (days <= 0 and credits == 0):
+        flash("Provide ident and positive days and/or credits", "warning")
         return redirect(url_for("admin_users", q=ident))
     user = db.resolve_user_by_ident(ident)
     if not user:
         flash("User not found", "danger")
         return redirect(url_for("admin_users", q=ident))
-    new_exp = db.grant_premium_by_user_id(user["id"], days)
-    db.log_admin("grant", {"user_id": user["id"], "ident": ident, "days": days}, performed_by="panel")
+    new_exp = None
+    if days > 0:
+        new_exp = db.grant_premium_by_user_id(user["id"], days)
+    if credits != 0:
+        try:
+            db.add_signal_credits_by_user_id(user["id"], credits)
+        except Exception:
+            pass
+    db.log_admin("grant", {"user_id": user["id"], "ident": ident, "days": days, "credits": credits}, performed_by="panel")
     if bot:
-        utils.send_safe(bot, user["telegram_id"], f"🎉 Premium +{days}d. New expiry: <b>{utils.format_ts_iso(new_exp)}</b>")
-    flash("Premium granted", "success")
+        parts = []
+        if days > 0:
+            parts.append(f"Premium +{days}d. New expiry: <b>{utils.format_ts_iso(new_exp)}</b>")
+        if credits != 0:
+            parts.append(f"Signal credits {'+' if credits>0 else ''}{credits}")
+        if parts:
+            utils.send_safe(bot, user["telegram_id"], "🎉 " + " \u2022 ".join(parts))
+    flash("Updated user: " + ("premium " if days>0 else "") + ("and " if days>0 and credits!=0 else "") + ("credits" if credits!=0 else ""), "success")
     return redirect(url_for("admin_users", q=ident))
 
 
@@ -177,6 +240,200 @@ def admin_broadcast_post():
     return redirect(url_for("admin_broadcast_page"))
 
 
+# ----- Admin: Verifications / Orders / Products -----
+@app.get("/admin/verifications")
+@ui_login_required
+def admin_verifications():
+    status = (request.args.get("status") or "").strip() or None
+    method = (request.args.get("method") or "").strip() or None
+    items = []
+    try:
+        items = db.list_verifications(status=status, method=method, limit=200)
+    except Exception:
+        logger.exception("list_verifications failed")
+    return render_template("admin/verifications.html", items=items, status=status or "", method=method or "")
+
+
+@app.get("/admin/verification/<int:vid>")
+@ui_login_required
+def admin_verification_detail(vid: int):
+    v = db.get_verification(vid)
+    if not v:
+        flash("Verification not found", "danger")
+        return redirect(url_for("admin_verifications"))
+    user = None
+    order = None
+    product = None
+    try:
+        user = db.get_user_by_id(v.get("user_id")) if hasattr(db, "get_user_by_id") else None
+    except Exception:
+        user = None
+    try:
+        if v.get("order_id") and hasattr(db, "get_order"):
+            order = db.get_order(v.get("order_id"))
+            if order and order.get("product_id") and hasattr(db, "get_product"):
+                product = db.get_product(order.get("product_id"))
+    except Exception:
+        pass
+    return render_template("admin/verification_detail.html", v=v, user=user, order=order, product=product)
+
+
+@app.post("/admin/verification/<int:vid>/approve")
+@ui_login_required
+def admin_verification_approve(vid: int):
+    days = int(request.form.get("days") or 0)
+    credits = int((request.form.get("credits") or 0))
+    v = db.get_verification(vid)
+    if not v:
+        flash("Verification not found", "danger")
+        return redirect(url_for("admin_verifications"))
+    user = db.get_user_by_id(v.get("user_id")) if hasattr(db, "get_user_by_id") else None
+    if not user:
+        flash("User not found", "danger")
+        return redirect(url_for("admin_verifications"))
+    # if order linked and no days specified, use product days
+    if days <= 0 and v.get("order_id") and hasattr(db, "get_order") and hasattr(db, "get_product"):
+        try:
+            order = db.get_order(v.get("order_id"))
+            prod = db.get_product(order.get("product_id")) if order else None
+            if prod and prod.get("days"):
+                days = int(prod.get("days"))
+        except Exception:
+            pass
+    if days <= 0:
+        days = 30
+    try:
+        new_exp = db.grant_premium_by_user_id(user["id"], days)
+        if credits != 0:
+            try:
+                db.add_signal_credits_by_user_id(user["id"], credits)
+            except Exception:
+                pass
+        if hasattr(db, "set_order_status") and v.get("order_id"):
+            try:
+                db.set_order_status(v.get("order_id"), "approved")
+            except Exception:
+                pass
+        if hasattr(db, "set_verification_status"):
+            db.set_verification_status(vid, "approved", notes=f"Approved {days}d; credits {credits}")
+        db.log_admin("verification_approve", {"verification_id": vid, "user_id": user["id"], "days": days, "credits": credits}, performed_by="panel")
+        if bot:
+            parts = [f"Premium +{days}d. New expiry: <b>{utils.format_ts_iso(new_exp)}</b>"]
+            if credits != 0:
+                parts.append(f"Signal credits {'+' if credits>0 else ''}{credits}")
+            utils.send_safe(bot, user["telegram_id"], "✅ Payment approved. " + " \u2022 ".join(parts))
+        flash("Verification approved and premium granted", "success")
+    except Exception:
+        logger.exception("approve failed")
+        flash("Approve failed", "danger")
+    return redirect(url_for("admin_verification_detail", vid=vid))
+
+
+@app.post("/admin/verification/<int:vid>/reject")
+@ui_login_required
+def admin_verification_reject(vid: int):
+    reason = (request.form.get("reason") or "").strip()
+    v = db.get_verification(vid)
+    if not v:
+        flash("Verification not found", "danger")
+        return redirect(url_for("admin_verifications"))
+    try:
+        if hasattr(db, "set_verification_status"):
+            db.set_verification_status(vid, "rejected", notes=reason or None)
+        if hasattr(db, "set_order_status") and v.get("order_id"):
+            try:
+                db.set_order_status(v.get("order_id"), "rejected")
+            except Exception:
+                pass
+        db.log_admin("verification_reject", {"verification_id": vid, "reason": reason}, performed_by="panel")
+        flash("Verification rejected", "success")
+    except Exception:
+        logger.exception("reject failed")
+        flash("Reject failed", "danger")
+    return redirect(url_for("admin_verification_detail", vid=vid))
+
+
+@app.get("/admin/orders")
+@ui_login_required
+def admin_orders():
+    status = (request.args.get("status") or "").strip() or None
+    items = []
+    try:
+        items = db.list_orders(status=status, limit=200) if hasattr(db, "list_orders") else []
+    except Exception:
+        logger.exception("list_orders failed")
+    return render_template("admin/orders.html", items=items, status=status or "")
+
+
+@app.get("/admin/products")
+@ui_login_required
+def admin_products():
+    items = []
+    try:
+        items = db.list_products(active_only=False)
+    except Exception:
+        logger.exception("list_products failed")
+    return render_template("admin/products.html", items=items)
+
+
+@app.post("/admin/products/create")
+@ui_login_required
+def admin_products_create():
+    name = (request.form.get("name") or "").strip()
+    days = int(request.form.get("days") or 0)
+    price_inr = request.form.get("price_inr")
+    price_usdt = request.form.get("price_usdt")
+    desc = (request.form.get("description") or "").strip()
+    if not name or days <= 0:
+        flash("Provide name and positive days", "warning")
+        return redirect(url_for("admin_products"))
+    try:
+        p_inr = float(price_inr) if price_inr else None
+        p_usdt = float(price_usdt) if price_usdt else None
+    except Exception:
+        p_inr, p_usdt = None, None
+    try:
+        db.create_product(name=name, days=days, price_inr=p_inr, price_usdt=p_usdt, description=desc)
+        db.log_admin("product_create", {"name": name, "days": days}, performed_by="panel")
+        flash("Product created", "success")
+    except Exception:
+        logger.exception("create_product failed")
+        flash("Create failed", "danger")
+    return redirect(url_for("admin_products"))
+
+
+@app.post("/admin/products/update")
+@ui_login_required
+def admin_products_update():
+    pid = int(request.form.get("id") or 0)
+    if pid <= 0:
+        flash("Invalid product id", "warning")
+        return redirect(url_for("admin_products"))
+    fields = {}
+    for key in ("name", "description"):
+        val = request.form.get(key)
+        if val is not None and val.strip() != "":
+            fields[key] = val.strip()
+    for key in ("days", "price_inr", "price_usdt"):
+        val = request.form.get(key)
+        if val is not None and val != "":
+            try:
+                fields[key] = int(val) if key == "days" else float(val)
+            except Exception:
+                pass
+    active = request.form.get("active")
+    if active is not None:
+        fields["active"] = (active == "1" or active.lower() == "true")
+    try:
+        db.update_product(pid, **fields)
+        db.log_admin("product_update", {"id": pid, **fields}, performed_by="panel")
+        flash("Product updated", "success")
+    except Exception:
+        logger.exception("update_product failed")
+        flash("Update failed", "danger")
+    return redirect(url_for("admin_products"))
+
+
 @app.post("/admin/cron")
 @ui_login_required
 def admin_cron():
@@ -212,6 +469,18 @@ def telegram_webhook(token: str):
     return jsonify({"ok": True})
 
 if bot:
+    try:
+        bot.set_my_commands([
+            telebot.types.BotCommand("start", "Start / show menu"),
+            telebot.types.BotCommand("menu", "Show menu"),
+            telebot.types.BotCommand("signal", "Get live signals"),
+            telebot.types.BotCommand("hours", "Market hours"),
+            telebot.types.BotCommand("status", "Premium status"),
+            telebot.types.BotCommand("premium", "Payment options"),
+            telebot.types.BotCommand("help", "Help"),
+        ])
+    except Exception:
+        pass
     # ----- Main Menu UI -----
     def build_main_menu(user):
         kb = types.InlineKeyboardMarkup(row_width=2)
@@ -231,6 +500,7 @@ if bot:
             types.InlineKeyboardButton("📈 LIVE SIGNALS", callback_data="menu:signals"),
             types.InlineKeyboardButton("📊 ANALYSIS TOOLS", callback_data="menu:tools"),
         )
+        kb.add(types.InlineKeyboardButton("🔥 24H VIP PROFIT", callback_data="menu:perf24h"))
         kb.add(
             types.InlineKeyboardButton("🕒 MARKET HOURS", callback_data="menu:hours"),
             types.InlineKeyboardButton("📅 PLAN STATUS", callback_data="menu:plan"),
@@ -255,6 +525,10 @@ if bot:
             types.InlineKeyboardButton("GOLD", callback_data="sig:GOLD"),
             types.InlineKeyboardButton("NASDAQ", callback_data="sig:NASDAQ"),
         )
+        kb.add(
+            types.InlineKeyboardButton("🏠 Main Menu", callback_data="menu:root"),
+            types.InlineKeyboardButton("👤 Profile", callback_data="menu:profile"),
+        )
         return kb
 
     def build_timeframes_kb(asset_code: str):
@@ -264,17 +538,230 @@ if bot:
             types.InlineKeyboardButton("3m", callback_data=f"tf:{asset_code}:3m"),
             types.InlineKeyboardButton("5m", callback_data=f"tf:{asset_code}:5m"),
         )
+        kb.add(
+            types.InlineKeyboardButton("⬅️ Assets", callback_data="back:assets"),
+            types.InlineKeyboardButton("🏠 Main Menu", callback_data="menu:root"),
+            types.InlineKeyboardButton("👤 Profile", callback_data="menu:profile"),
+        )
         return kb
+
+    def build_signal_nav_kb(asset_code: str):
+        kb = types.InlineKeyboardMarkup(row_width=3)
+        kb.add(
+            types.InlineKeyboardButton("🔁 More", callback_data=f"sig:{asset_code}"),
+            types.InlineKeyboardButton("⬅️ Assets", callback_data="back:assets"),
+        )
+        kb.add(
+            types.InlineKeyboardButton("🏠 Main Menu", callback_data="menu:root"),
+            types.InlineKeyboardButton("👤 Profile", callback_data="menu:profile"),
+        )
+        return kb
+
+    def build_basic_nav_kb():
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(
+            types.InlineKeyboardButton("🏠 Main Menu", callback_data="menu:root"),
+            types.InlineKeyboardButton("👤 Profile", callback_data="menu:profile"),
+        )
+        return kb
+
+    def build_main_reply_kb(user):
+        kb = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True, one_time_keyboard=False, selective=False)
+        registered = bool(user)
+        if not registered:
+            kb.add(types.KeyboardButton("✅ SIGN UP"), types.KeyboardButton("🔑 LOGIN"))
+        else:
+            kb.add(types.KeyboardButton("👤 PROFILE"))
+        kb.add(types.KeyboardButton("🚀 GET STARTED"), types.KeyboardButton("❓ HOW IT WORKS"))
+        kb.add(types.KeyboardButton("📈 LIVE SIGNALS"), types.KeyboardButton("📊 ANALYSIS TOOLS"))
+        kb.add(types.KeyboardButton("🔥 24H VIP PROFIT"))
+        kb.add(types.KeyboardButton("🕒 MARKET HOURS"), types.KeyboardButton("📅 PLAN STATUS"))
+        kb.add(types.KeyboardButton("💳 BUY PREMIUM"))
+        kb.add(types.KeyboardButton("🧾 UPLOAD RECEIPT"))
+        kb.add(types.KeyboardButton("💬 SUPPORT"))
+        kb.add(types.KeyboardButton("⚠️ RISK DISCLAIMER"))
+        return kb
+
+    SIGNAL_LAST: dict[int, str] = {}
+
+    def build_assets_reply_kb():
+        kb = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+        kb.add(types.KeyboardButton("BTC/USDT"), types.KeyboardButton("ETH/USDT"))
+        kb.add(types.KeyboardButton("EUR/USD"), types.KeyboardButton("GBP/JPY"))
+        kb.add(types.KeyboardButton("GOLD"), types.KeyboardButton("NASDAQ"))
+        kb.add(types.KeyboardButton("🏠 HOME"))
+        return kb
+
+    def build_timeframes_reply_kb():
+        kb = types.ReplyKeyboardMarkup(row_width=3, resize_keyboard=True)
+        kb.add(types.KeyboardButton("1m"), types.KeyboardButton("3m"), types.KeyboardButton("5m"))
+        kb.add(types.KeyboardButton("⬅️ BACK"), types.KeyboardButton("🏠 HOME"))
+        return kb
+
+    def _send_kb_quietly(chat_id: int, kb):
+        try:
+            # Send an invisible character and KEEP the message so the reply keyboard persists
+            bot.send_message(chat_id, "\u2063", reply_markup=kb)
+        except Exception:
+            pass
+
+    def build_payment_kb():
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(
+            types.InlineKeyboardButton("✅ Verify UPI", callback_data="pay:verify_upi"),
+            types.InlineKeyboardButton("✅ Verify USDT", callback_data="pay:verify_usdt"),
+        )
+        kb.add(
+            types.InlineKeyboardButton("🏠 Main Menu", callback_data="menu:root"),
+            types.InlineKeyboardButton("👤 Profile", callback_data="menu:profile"),
+        )
+        return kb
+
+    def build_products_kb():
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        try:
+            items = db.list_products(active_only=True)
+        except Exception:
+            items = []
+        for p in items or []:
+            label = f"{p.get('name')} — {p.get('days')}d"
+            kb.add(types.InlineKeyboardButton(label, callback_data=f"plan:{p.get('id')}"))
+        kb.add(
+            types.InlineKeyboardButton("🏠 Main Menu", callback_data="menu:root"),
+            types.InlineKeyboardButton("👤 Profile", callback_data="menu:profile"),
+        )
+        return kb
+
+    def _user_has_premium(u):
+        try:
+            if not u:
+                return False
+            if "premium_active" in u:
+                return bool(u.get("premium_active"))
+            if "is_premium" in u:
+                return bool(u.get("is_premium"))
+        except Exception:
+            pass
+
+    @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("plan:"))
+    def on_plan_select(call: types.CallbackQuery):
+        pid = int(call.data.split(":", 1)[1])
+        uid = call.from_user.id
+        user = db.get_user_by_telegram_id(uid) or (
+            db.upsert_user(uid, call.from_user.username or "", call.from_user.first_name or "", call.from_user.last_name or "", call.from_user.language_code or None) or
+            db.get_user_by_telegram_id(uid)
+        )
+        p = db.get_product(pid)
+        if not p:
+            try:
+                bot.answer_callback_query(call.id, "Plan not found")
+            except Exception:
+                pass
+            return
+        # Create pending order
+        try:
+            db.create_order(user_id=user['id'], product_id=pid, method=None, amount=None, currency=None, status='pending')
+        except Exception:
+            pass
+        upi = os.getenv("UPI_ID")
+        tron = os.getenv("USDT_TRC20_ADDRESS") or os.getenv("TRON_ADDRESS")
+        evm = os.getenv("EVM_ADDRESS")
+        price_bits = []
+        if p.get('price_inr') is not None: price_bits.append(f"₹{int(p['price_inr'])}")
+        if p.get('price_usdt') is not None: price_bits.append(f"${p['price_usdt']} USDT")
+        lines = [
+            f"Plan: <b>{utils.escape_html(p.get('name'))}</b> — {p.get('days')} days",
+            f"Price: {', '.join(price_bits) or 'N/A'}",
+            "",
+            "Pay to any of these (then Verify):",
+            f"• UPI: <code>{utils.escape_html(upi)}</code>" if upi else None,
+            f"• USDT TRC20: <code>{utils.escape_html(tron)}</code>" if tron else None,
+            f"• USDT (EVM): <code>{utils.escape_html(evm)}</code>" if evm else None,
+            "",
+            "After paying, tap Verify and send the ID/hash or upload receipt (🧾).",
+        ]
+        text = "\n".join([x for x in lines if x])
+        try:
+            bot.answer_callback_query(call.id)
+        except Exception:
+            pass
+        try:
+            bot.send_message(call.message.chat.id, text, reply_markup=build_payment_kb())
+        except Exception:
+            pass
+
+    # --- Receipt upload handlers ---
+    @bot.message_handler(content_types=["photo"])
+    def on_receipt_photo(m: types.Message):
+        user = db.get_user_by_telegram_id(m.from_user.id) or (
+            db.upsert_user(m.from_user.id, m.from_user.username or "", m.from_user.first_name or "", m.from_user.last_name or "", m.from_user.language_code or None) or
+            db.get_user_by_telegram_id(m.from_user.id)
+        )
+        try:
+            file_id = m.photo[-1].file_id if m.photo else None
+            caption = m.caption or ""
+            vid = db.insert_verification(user["id"], "receipt", "pending", tx_id=None, tx_hash=None, amount=None, currency=None, request_data={"file_id": file_id, "caption": caption}, notes=None)
+            try:
+                order = db.get_latest_pending_order_by_user_and_method(user['id'], None)
+                if order:
+                    db.update_order_receipt(order['id'], receipt_file_id=file_id, caption=caption)
+                    db.set_order_status(order['id'], 'submitted')
+                    db.update_verification_order(vid, order['id'])
+            except Exception:
+                pass
+            utils.send_safe(bot, m.chat.id, "🧾 Receipt received. We'll review and update you.")
+            admin_id = os.getenv("ADMIN_ID")
+            if admin_id:
+                try:
+                    bot.copy_message(chat_id=int(admin_id), from_chat_id=m.chat.id, message_id=m.message_id)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    @bot.message_handler(content_types=["document"])
+    def on_receipt_doc(m: types.Message):
+        user = db.get_user_by_telegram_id(m.from_user.id) or (
+            db.upsert_user(m.from_user.id, m.from_user.username or "", m.from_user.first_name or "", m.from_user.last_name or "", m.from_user.language_code or None) or
+            db.get_user_by_telegram_id(m.from_user.id)
+        )
+        try:
+            file_id = m.document.file_id if m.document else None
+            caption = m.caption or ""
+            vid = db.insert_verification(user["id"], "receipt", "pending", tx_id=None, tx_hash=None, amount=None, currency=None, request_data={"file_id": file_id, "caption": caption, "mime": getattr(m.document, 'mime_type', None)}, notes=None)
+            try:
+                order = db.get_latest_pending_order_by_user_and_method(user['id'], None)
+                if order:
+                    db.update_order_receipt(order['id'], receipt_file_id=file_id, caption=caption)
+                    db.set_order_status(order['id'], 'submitted')
+                    db.update_verification_order(vid, order['id'])
+            except Exception:
+                pass
+            utils.send_safe(bot, m.chat.id, "🧾 Receipt received. We'll review and update you.")
+            admin_id = os.getenv("ADMIN_ID")
+            if admin_id:
+                try:
+                    bot.copy_message(chat_id=int(admin_id), from_chat_id=m.chat.id, message_id=m.message_id)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return False
+
+    def _user_expiry(u):
+        if not u:
+            return None
+        return u.get("premium_expires_at") or u.get("premium_until")
 
     @bot.message_handler(commands=["start"])
     def cmd_start(m: types.Message):
         u = m.from_user
-        db.upsert_user(u.id, u.username or "", u.first_name or "", u.last_name or "", u.language_code or None)
+        # Do not auto-register; show SIGN UP / LOGIN until user explicitly registers
         user = db.get_user_by_telegram_id(u.id)
-        msg = "You have an active premium subscription." if user and user.get("premium_active") else "You do not have an active premium subscription."
-        utils.send_safe(bot, u.id, f"👋 Welcome, {utils.escape_html(u.first_name or 'friend')}!\n\n{msg}\nUse /menu to open the main menu.")
+        msg = "You have an active premium subscription." if _user_has_premium(user) else "You do not have an active premium subscription."
+        utils.send_safe(bot, u.id, f"👋 Welcome, {utils.escape_html(u.first_name or 'friend')}!\n\n{msg}\nUse the keyboard below or /menu.")
         try:
-            bot.send_message(u.id, "Main Menu:", reply_markup=build_main_menu(user))
+            bot.send_message(u.id, "Choose an option:", reply_markup=build_main_reply_kb(user))
         except Exception:
             pass
 
@@ -286,25 +773,31 @@ if bot:
     def cmd_menu(m: types.Message):
         user = db.get_user_by_telegram_id(m.from_user.id)
         try:
-            bot.send_message(m.chat.id, "Main Menu:", reply_markup=build_main_menu(user))
+            bot.send_message(m.chat.id, "Choose an option:", reply_markup=build_main_reply_kb(user))
         except Exception:
             pass
 
     @bot.message_handler(commands=["signal"])
     def cmd_signal(m: types.Message):
         user = db.get_user_by_telegram_id(m.from_user.id)
-        if not user or not user.get("premium_active"):
-            utils.send_safe(bot, m.chat.id, "📈 Live signals are for premium users. Use /status or PLAN STATUS to check your subscription.")
+        uid = m.from_user.id
+        if not _user_has_premium(user):
+            # Allow 1 free sample per day
+            today = datetime.now(timezone.utc).date().isoformat()
+            if FREE_SAMPLES.get(uid) == today:
+                utils.send_safe(bot, m.chat.id, "🎟️ Free sample used for today. Upgrade to premium to continue.")
+                return
+            _send_kb_quietly(m.chat.id, build_assets_reply_kb())
             return
-        try:
-            bot.send_message(m.chat.id, "Select an asset:", reply_markup=build_assets_kb())
-        except Exception:
-            pass
+        _send_kb_quietly(m.chat.id, build_assets_reply_kb())
 
     @bot.message_handler(commands=["hours"])
     def cmd_hours(m: types.Message):
         msg = utils.market_hours_message()
-        utils.send_safe(bot, m.chat.id, msg)
+        try:
+            bot.send_message(m.chat.id, msg, reply_markup=build_basic_nav_kb())
+        except Exception:
+            pass
 
     @bot.message_handler(commands=["id"])
     def cmd_id(m: types.Message):
@@ -313,19 +806,51 @@ if bot:
     @bot.message_handler(commands=["status"])
     def cmd_status(m: types.Message):
         user = db.get_user_by_telegram_id(m.from_user.id)
-        if not user or not user.get("premium_active"):
-            utils.send_safe(bot, m.chat.id, "❌ Premium status: Inactive")
+        if not _user_has_premium(user):
+            try:
+                bot.send_message(m.chat.id, "❌ Premium status: Inactive", reply_markup=build_basic_nav_kb())
+            except Exception:
+                pass
             return
-        utils.send_safe(bot, m.chat.id, f"✅ Premium: Active\nExpires: <b>{utils.format_ts_iso(user.get('premium_expires_at'))}</b>")
+        try:
+            bot.send_message(m.chat.id, f"✅ Premium: Active\nExpires: <b>{utils.format_ts_iso(_user_expiry(user))}</b>", reply_markup=build_basic_nav_kb())
+        except Exception:
+            pass
 
     @bot.message_handler(commands=["premium"])
     def cmd_premium(m: types.Message):
-        lines = ["Payment options:"]
-        if os.getenv("UPI_ID"): lines.append(f"- UPI: <code>{utils.escape_html(os.getenv('UPI_ID'))}</code>")
-        if os.getenv("USDT_TRC20_ADDRESS"): lines.append(f"- USDT TRC20: <code>{utils.escape_html(os.getenv('USDT_TRC20_ADDRESS'))}</code>")
-        if len(lines) == 1: lines.append("- Not configured. Contact admin.")
-        lines.append("\nAfter payment, send /verify_upi <txn_id> or /verify_usdt <tx_hash>.")
-        utils.send_safe(bot, m.chat.id, "\n".join(lines))
+        # Show available plans first
+        try:
+            items = db.list_products(active_only=True)
+        except Exception:
+            items = []
+        if not items:
+            # fallback to direct addresses
+            upi = os.getenv("UPI_ID")
+            usdt = os.getenv("USDT_TRC20_ADDRESS") or os.getenv("TRON_ADDRESS")
+            evm = os.getenv("EVM_ADDRESS")
+            lines = [
+                "💳 Payment options:",
+                f"- UPI: <code>{utils.escape_html(upi)}</code>" if upi else "- UPI: not configured",
+                f"- USDT TRC20: <code>{utils.escape_html(usdt)}</code>" if usdt else "- USDT TRC20: not configured",
+                f"- USDT (EVM: ETH/BSC/Polygon): <code>{utils.escape_html(evm)}</code>" if evm else "- USDT (EVM): not configured",
+            ]
+            try:
+                bot.send_message(m.chat.id, "\n".join(lines), reply_markup=build_payment_kb())
+            except Exception:
+                pass
+            return
+        # Build plans list
+        lines = ["Select a plan:"]
+        for p in items:
+            price_bits = []
+            if p.get('price_inr') is not None: price_bits.append(f"₹{int(p['price_inr'])}")
+            if p.get('price_usdt') is not None: price_bits.append(f"${p['price_usdt']} USDT")
+            lines.append(f"• {p.get('name')} — {p.get('days')}d ({', '.join(price_bits)})")
+        try:
+            bot.send_message(m.chat.id, "\n".join(lines), reply_markup=build_products_kb())
+        except Exception:
+            pass
 
     @bot.message_handler(commands=["verify_upi"])
     def cmd_verify_upi(m: types.Message):
@@ -337,7 +862,16 @@ if bot:
             db.upsert_user(m.from_user.id, m.from_user.username or "", m.from_user.first_name or "", m.from_user.last_name or "", m.from_user.language_code or None) or
             db.get_user_by_telegram_id(m.from_user.id)
         )
-        db.insert_verification(user["id"], "upi", "pending", tx_id=parts[1].strip(), tx_hash=None, amount=None, currency=None, request_data={"from":"bot"})
+        vid = db.insert_verification(user["id"], "upi", "pending", tx_id=parts[1].strip(), tx_hash=None, amount=None, currency=None, request_data={"from":"bot"})
+        try:
+            order = db.get_latest_pending_order_by_user_and_method(user['id'], None)
+            if order:
+                db.update_order_method(order['id'], 'upi')
+                db.update_order_tx(order['id'], tx_id=parts[1].strip(), tx_hash=None)
+                db.set_order_status(order['id'], 'submitted')
+                db.update_verification_order(vid, order['id'])
+        except Exception:
+            pass
         utils.send_safe(bot, m.chat.id, "✅ UPI verification received. We'll review and update you.")
 
     @bot.message_handler(commands=["verify_usdt"])
@@ -354,7 +888,16 @@ if bot:
         res = utils.verify_transaction(txh)
         status = "auto_pass" if res.get("found") and res.get("success") else "pending"
         method = "usdt_trc20" if res.get("network") == "tron" else "evm"
-        db.insert_verification(user["id"], method, status, tx_id=None, tx_hash=txh, amount=None, currency="USDT", request_data=res, notes=None)
+        vid = db.insert_verification(user["id"], method, status, tx_id=None, tx_hash=txh, amount=None, currency="USDT", request_data=res, notes=None)
+        try:
+            order = db.get_latest_pending_order_by_user_and_method(user['id'], None)
+            if order:
+                db.update_order_method(order['id'], 'usdt')
+                db.update_order_tx(order['id'], tx_id=None, tx_hash=txh)
+                db.set_order_status(order['id'], 'submitted')
+                db.update_verification_order(vid, order['id'])
+        except Exception:
+            pass
         utils.send_safe(bot, m.chat.id, "✅ Tx received. " + ("Auto-verified." if status == "auto_pass" else "Awaiting manual review."))
 
     @bot.message_handler(func=lambda m: True, content_types=["text"])
@@ -364,15 +907,338 @@ if bot:
         except Exception:
             pass
         txt = (m.text or "").strip().lower()
-        if txt in ("signal", "signals", "get signal", "get signals"):
-            user = db.get_user_by_telegram_id(m.from_user.id)
-            if not user or not user.get("premium_active"):
-                utils.send_safe(bot, m.chat.id, "📈 Live signals are for premium users. Use /status or PLAN STATUS to check your subscription.")
-                return
+        user = db.get_user_by_telegram_id(m.from_user.id)
+        # Reply keyboard actions
+        if "sign up" in txt or "signup" in txt or "login" in txt:
+            if not user:
+                db.upsert_user(m.from_user.id, m.from_user.username or "", m.from_user.first_name or "", m.from_user.last_name or "", m.from_user.language_code or None)
+                user = db.get_user_by_telegram_id(m.from_user.id)
+            # Show profile immediately and refresh keyboard (LOGIN/SIGN UP hidden now)
+            p = user or {}
+            status = "Active" if _user_has_premium(p) else "Inactive"
+            exp = utils.format_ts_iso(_user_expiry(p)) if p else "N/A"
+            text = (
+                f"👤 Profile\n"
+                f"Name: {utils.escape_html((m.from_user.first_name or '').strip())}\n"
+                f"Username: @{utils.escape_html(m.from_user.username or '')}\n"
+                f"Status: {status}\n"
+                f"Expiry: {exp}"
+            )
             try:
-                bot.send_message(m.chat.id, "Select an asset:", reply_markup=build_assets_kb())
+                bot.send_message(m.chat.id, text, reply_markup=build_main_reply_kb(user))
             except Exception:
                 pass
+            return
+        if "profile" in txt:
+            p = user or {}
+            status = "Active" if _user_has_premium(p) else "Inactive"
+            exp = utils.format_ts_iso(_user_expiry(p)) if p else "N/A"
+            text = (
+                f"👤 Profile\n"
+                f"Name: {utils.escape_html((m.from_user.first_name or '').strip())}\n"
+                f"Username: @{utils.escape_html(m.from_user.username or '')}\n"
+                f"Status: {status}\n"
+                f"Expiry: {exp}"
+            )
+            try:
+                bot.send_message(m.chat.id, text, reply_markup=build_main_reply_kb(user))
+            except Exception:
+                pass
+            return
+        if "get started" in txt:
+            text = (
+                "🚀 Get Started\n"
+                "1) Tap SIGN UP or /start to register.\n"
+                "2) Pay via /premium options.\n"
+                "3) After grant, you will receive LIVE SIGNALS here."
+            )
+            try:
+                bot.send_message(m.chat.id, text, reply_markup=build_main_reply_kb(user))
+            except Exception:
+                pass
+            return
+        if "buy premium" in txt or "payment" in txt or txt == "premium" or "renew" in txt:
+            # Show plans via inline keyboard
+            try:
+                items = db.list_products(active_only=True)
+            except Exception:
+                items = []
+            if not items:
+                cmd_premium(m)
+                return
+            lines = ["Select a plan:"]
+            for p in items:
+                price_bits = []
+                if p.get('price_inr') is not None: price_bits.append(f"₹{int(p['price_inr'])}")
+                if p.get('price_usdt') is not None: price_bits.append(f"${p['price_usdt']} USDT")
+                lines.append(f"• {p.get('name')} — {p.get('days')}d ({', '.join(price_bits)})")
+            try:
+                bot.send_message(m.chat.id, "\n".join(lines), reply_markup=build_products_kb())
+            except Exception:
+                pass
+            return
+        if "how it works" in txt:
+            text = (
+                "❓ How it works\n"
+                "- We verify your payment (UPI/USDT).\n"
+                "- Admin grants premium.\n"
+                "- Signals and updates are sent right in this chat."
+            )
+            try:
+                bot.send_message(m.chat.id, text, reply_markup=build_main_reply_kb(user))
+            except Exception:
+                pass
+            return
+        if "market hours" in txt:
+            msg = utils.market_hours_message()
+            try:
+                bot.send_message(m.chat.id, msg, reply_markup=build_main_reply_kb(user))
+            except Exception:
+                pass
+            return
+        if "24h" in txt or "24 hour" in txt or "24-hour" in txt or "vip profit" in txt or "profit report" in txt or "24h profit" in txt:
+            try:
+                report = utils.generate_24h_served_report(db)
+                bot.send_message(m.chat.id, report, reply_markup=build_main_reply_kb(user))
+            except Exception:
+                pass
+            return
+        if "plan status" in txt or txt == "status":
+            if not _user_has_premium(user):
+                try:
+                    bot.send_message(m.chat.id, "❌ Premium status: Inactive", reply_markup=build_main_reply_kb(user))
+                except Exception:
+                    pass
+            else:
+                try:
+                    bot.send_message(m.chat.id, f"✅ Premium: Active\nExpires: <b>{utils.format_ts_iso(_user_expiry(user))}</b>", reply_markup=build_main_reply_kb(user))
+                except Exception:
+                    pass
+            return
+        if "support" in txt:
+            try:
+                bot.send_message(m.chat.id, f"💬 Support: {utils.escape_html(SUPPORT_CONTACT)}", reply_markup=build_main_reply_kb(user))
+            except Exception:
+                pass
+            return
+        if "risk disclaimer" in txt or "disclaimer" in txt:
+            text = (
+                "⚠️ Risk Disclaimer\n"
+                "Trading involves risk. Past performance is not indicative of future results."
+            )
+            try:
+                bot.send_message(m.chat.id, text, reply_markup=build_main_reply_kb(user))
+            except Exception:
+                pass
+            return
+        if "analysis tools" in txt:
+            try:
+                bot.send_message(m.chat.id, "📊 Analysis tools coming soon.", reply_markup=build_main_reply_kb(user))
+            except Exception:
+                pass
+            return
+        if "live signals" in txt:
+            uid = m.from_user.id
+            if not _user_has_premium(user):
+                today = datetime.now(timezone.utc).date().isoformat()
+                if FREE_SAMPLES.get(uid) == today:
+                    utils.send_safe(bot, m.chat.id, "🎟️ Free sample used for today. Upgrade to premium to continue.")
+                    return
+                _send_kb_quietly(m.chat.id, build_assets_reply_kb())
+                return
+            _send_kb_quietly(m.chat.id, build_assets_reply_kb())
+            return
+
+        # Existing shortcuts
+        if txt in ("signal", "signals", "get signal", "get signals"):
+            uid = m.from_user.id
+            if not _user_has_premium(user):
+                today = datetime.now(timezone.utc).date().isoformat()
+                if FREE_SAMPLES.get(uid) == today:
+                    utils.send_safe(bot, m.chat.id, "🎟️ Free sample used for today. Upgrade to premium to continue.")
+                    return
+                _send_kb_quietly(m.chat.id, build_assets_reply_kb())
+            else:
+                _send_kb_quietly(m.chat.id, build_assets_reply_kb())
+
+        asset_map = {
+            "btc/usdt": "BTCUSDT",
+            "eth/usdt": "ETHUSDT",
+            "eur/usd": "EURUSD",
+            "gbp/jpy": "GBPJPY",
+            "gold": "GOLD",
+            "nasdaq": "NASDAQ",
+        }
+        if txt in asset_map:
+            SIGNAL_LAST[m.from_user.id] = asset_map[txt]
+            _send_kb_quietly(m.chat.id, build_timeframes_reply_kb())
+            return
+        if txt in ("1m", "3m", "5m"):
+            asset_code = SIGNAL_LAST.get(m.from_user.id)
+            if not asset_code:
+                _send_kb_quietly(m.chat.id, build_assets_reply_kb())
+                return
+            uid = m.from_user.id
+            user = db.get_user_by_telegram_id(uid)
+            if not _user_has_premium(user):
+                today = datetime.now(timezone.utc).date().isoformat()
+                if FREE_SAMPLES.get(uid) == today:
+                    utils.send_safe(bot, m.chat.id, "🎟️ Free sample used for today. Upgrade to premium.")
+                    return
+                FREE_SAMPLES[uid] = today
+                quota = {"ok": True, "source": "free", "used_today": 1, "daily_limit": 1, "credits": 0}
+            else:
+                quota = db.consume_signal_by_telegram_id(uid)
+                if not quota.get("ok"):
+                    msg = (
+                        "❗ Daily signal limit reached and no credits left.\n"
+                        "Each extra signal costs ₹150. Contact Support to top-up credits: "
+                        f"{utils.escape_html(SUPPORT_CONTACT)}"
+                    )
+                    utils.send_safe(bot, m.chat.id, msg)
+                    return
+            code_to_pair = {
+                "BTCUSDT": "BTC/USDT",
+                "ETHUSDT": "ETH/USDT",
+                "EURUSD": "EUR/USD",
+                "GBPJPY": "GBP/JPY",
+                "GOLD": "GOLD",
+                "NASDAQ": "NASDAQ",
+            }
+            pair = code_to_pair.get(asset_code, asset_code)
+            text = utils.generate_ensemble_signal(pair, txt)
+            footer = (
+                f"\nRemaining today: {max(quota.get('daily_limit',0)-quota.get('used_today',0),0)} · "
+                f"Credits: {quota.get('credits',0)} ({'daily' if quota.get('source')=='daily' else ('credit' if quota.get('source')=='credit' else 'free')} used)"
+            )
+            try:
+                # Send immediately without waiting for price
+                base_msg = bot.send_message(m.chat.id, text + "\n" + footer, reply_markup=build_timeframes_reply_kb())
+                direction = utils.direction_from_signal_text(text) or ""
+                def _fmt(v):
+                    if v is None:
+                        return "-"
+                    v = float(v)
+                    if v >= 100: return f"{v:.2f}"
+                    if v >= 1: return f"{v:.4f}"
+                    return f"{v:.6f}"
+                def _after_send():
+                    try:
+                        entry_time_iso = datetime.now(timezone.utc).isoformat()
+                        entry_price = utils.get_entry_price(pair, txt)
+                        if entry_price is None:
+                            for alt in ("1m", "5m", "3m"):
+                                try:
+                                    entry_price = utils.get_entry_price(pair, alt)
+                                    if entry_price is not None:
+                                        break
+                                except Exception:
+                                    pass
+                        if entry_price is None:
+                            try:
+                                entry_price = utils.get_close_at_time(pair, txt, entry_time_iso)
+                            except Exception:
+                                entry_price = None
+                        # Post a follow-up line with entry price
+                        if direction in ("UP", "DOWN"):
+                            details = f"Entry price: <code>{_fmt(entry_price)}</code> (update in {txt})"
+                        else:
+                            details = f"Entry price: <code>{_fmt(entry_price)}</code>"
+                        details_msg = bot.send_message(m.chat.id, details)
+                        # Log served signal
+                        try:
+                            urow = db.get_user_by_telegram_id(uid) or (
+                                db.upsert_user(uid, m.from_user.username or "", m.from_user.first_name or "", m.from_user.last_name or "", m.from_user.language_code or None) or 
+                                db.get_user_by_telegram_id(uid)
+                            )
+                            if urow and hasattr(db, 'insert_signal_log'):
+                                db.insert_signal_log(
+                                    user_id=urow.get('id'),
+                                    telegram_id=uid,
+                                    pair=pair,
+                                    timeframe=txt,
+                                    direction=direction,
+                                    entry_price=entry_price,
+                                    source=quota.get('source'),
+                                    message_id=getattr(base_msg, 'message_id', None),
+                                    raw_text=text,
+                                    entry_time=entry_time_iso
+                                )
+                                # Log details line as separate message so admin delete can remove it
+                                db.insert_signal_log(
+                                    user_id=urow.get('id'),
+                                    telegram_id=uid,
+                                    pair=pair,
+                                    timeframe=txt,
+                                    direction=direction,
+                                    entry_price=entry_price,
+                                    source='details',
+                                    message_id=getattr(details_msg, 'message_id', None),
+                                    raw_text=details,
+                                    entry_time=entry_time_iso
+                                )
+                        except Exception:
+                            pass
+                        # Schedule updates only for real trades
+                        try:
+                            if direction in ("UP", "DOWN"):
+                                for tf_label, delay in [("1m", 55), ("3m", 175), ("5m", 295)]:
+                                    def _post_update(tf_label=tf_label, entry_price=entry_price, urow=urow):
+                                        try:
+                                            now_iso = datetime.now(timezone.utc).isoformat()
+                                            new_price = utils.get_entry_price(pair, tf_label)
+                                            if new_price is None:
+                                                for alt in ("1m", "5m"):
+                                                    new_price = utils.get_entry_price(pair, alt)
+                                                    if new_price is not None:
+                                                        break
+                                            if new_price is None:
+                                                new_price = utils.get_close_at_time(pair, tf_label, now_iso)
+                                            if entry_price is not None and new_price is not None and entry_price:
+                                                ch = (float(new_price) - float(entry_price)) / float(entry_price) * 100.0
+                                                delta = f"{ch:+.2f}%"
+                                            else:
+                                                delta = "-"
+                                            upd = (
+                                                f"⏱ {tf_label} update for {pair}\n"
+                                                f"Entry: <code>{_fmt(entry_price)}</code> → Now: <code>{_fmt(new_price)}</code>\n"
+                                                f"Change: {delta}"
+                                            )
+                                            upd_msg = bot.send_message(m.chat.id, upd, reply_markup=build_timeframes_reply_kb())
+                                            # Log update message id
+                                            try:
+                                                if urow and hasattr(db, 'insert_signal_log'):
+                                                    db.insert_signal_log(
+                                                        user_id=urow.get('id'),
+                                                        telegram_id=uid,
+                                                        pair=pair,
+                                                        timeframe=tf_label,
+                                                        direction=direction,
+                                                        entry_price=new_price,
+                                                        source=f'update:{tf_label}',
+                                                        message_id=getattr(upd_msg, 'message_id', None),
+                                                        raw_text=upd,
+                                                        entry_time=now_iso
+                                                    )
+                                            except Exception:
+                                                pass
+                                        except Exception:
+                                            pass
+                                    threading.Timer(delay, _post_update).start()
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                threading.Thread(target=_after_send, daemon=True).start()
+            except Exception:
+                pass
+            return
+        if txt in ("🏠 home", "home", "🏠"):
+            _send_kb_quietly(m.chat.id, build_main_reply_kb(user))
+            return
+        if txt.startswith("⬅️ back"):
+            _send_kb_quietly(m.chat.id, build_assets_reply_kb())
+            return
 
     @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("menu:"))
     def on_menu_click(call: types.CallbackQuery):
@@ -388,8 +1254,8 @@ if bot:
             text = "✅ You are now registered."
         elif action == "profile":
             p = user or {}
-            status = "Active" if p.get("premium_active") else "Inactive"
-            exp = utils.format_ts_iso(p.get("premium_expires_at")) if p else "N/A"
+            status = "Active" if _user_has_premium(p) else "Inactive"
+            exp = utils.format_ts_iso(_user_expiry(p)) if p else "N/A"
             text = (
                 f"👤 Profile\n"
                 f"Name: {utils.escape_html((call.from_user.first_name or '').strip())}\n"
@@ -412,23 +1278,27 @@ if bot:
                 "- Signals and updates are sent right in this chat."
             )
         elif action == "signals":
-            if user and user.get("premium_active"):
-                try:
-                    bot.send_message(call.message.chat.id, "Select an asset:", reply_markup=build_assets_kb())
-                except Exception:
-                    pass
+            if _user_has_premium(user):
+                _send_kb_quietly(call.message.chat.id, build_assets_reply_kb())
                 text = None
             else:
-                text = "📈 Live signals are for premium users. Check PLAN STATUS for your subscription."
+                today = datetime.now(timezone.utc).date().isoformat()
+                if FREE_SAMPLES.get(uid) != today:
+                    _send_kb_quietly(call.message.chat.id, build_assets_reply_kb())
+                    text = None
+                else:
+                    text = "📈 Live signals are for premium users. Check PLAN STATUS for your subscription."
         elif action == "tools":
             text = "📊 Analysis tools coming soon."
         elif action == "hours":
             text = utils.market_hours_message()
+        elif action == "perf24h":
+            text = utils.generate_24h_served_report(db)
         elif action == "plan":
-            if not user or not user.get("premium_active"):
+            if not _user_has_premium(user):
                 text = "❌ Premium status: Inactive"
             else:
-                text = f"✅ Premium: Active\nExpires: <b>{utils.format_ts_iso(user.get('premium_expires_at'))}</b>"
+                text = f"✅ Premium: Active\nExpires: <b>{utils.format_ts_iso(_user_expiry(user))}</b>"
         elif action == "support":
             text = f"💬 Support: {utils.escape_html(SUPPORT_CONTACT)}"
         elif action == "disclaimer":
@@ -436,6 +1306,8 @@ if bot:
                 "⚠️ Risk Disclaimer\n"
                 "Trading involves risk. Past performance is not indicative of future results."
             )
+        elif action == "root":
+            text = "Choose an option:"
 
         try:
             bot.answer_callback_query(call.id)
@@ -444,25 +1316,70 @@ if bot:
 
         if text:
             try:
-                bot.send_message(call.message.chat.id, text, reply_markup=build_main_menu(db.get_user_by_telegram_id(uid)))
+                if action == "root":
+                    bot.send_message(call.message.chat.id, text, reply_markup=build_main_reply_kb(db.get_user_by_telegram_id(uid)))
+                else:
+                    bot.send_message(call.message.chat.id, text, reply_markup=build_basic_nav_kb())
             except Exception:
                 pass
-        # Update the menu on the original message too (hide signup/login after registration)
+        # Update inline markup if present on the original message
         try:
             bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=build_main_menu(db.get_user_by_telegram_id(uid)))
         except Exception:
             pass
 
+    @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("pay:"))
+    def on_pay_click(call: types.CallbackQuery):
+        action = call.data.split(":", 1)[1]
+        try:
+            bot.answer_callback_query(call.id)
+        except Exception:
+            pass
+        if action == "verify_upi":
+            txt = "Send your UPI transaction id using:\n<code>/verify_upi TXN_ID</code>"
+        elif action == "verify_usdt":
+            txt = "Send your USDT tx hash using:\n<code>/verify_usdt TX_HASH</code>"
+        else:
+            txt = "Payment support"
+        # Remember chosen method on latest pending order
+        try:
+            uid = call.from_user.id
+            order = db.get_latest_pending_order_by_user_and_method(db.get_user_by_telegram_id(uid)['id'], None)
+            if order:
+                db.update_order_method(order['id'], 'upi' if action == 'verify_upi' else 'usdt')
+        except Exception:
+            pass
+        try:
+            bot.send_message(call.message.chat.id, txt, reply_markup=build_basic_nav_kb())
+        except Exception:
+            pass
+
+    @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("back:"))
+    def on_back_click(call: types.CallbackQuery):
+        action = call.data.split(":", 1)[1]
+        try:
+            bot.answer_callback_query(call.id)
+        except Exception:
+            pass
+        if action == "assets":
+            try:
+                bot.send_message(call.message.chat.id, "Select an asset:", reply_markup=build_assets_kb())
+            except Exception:
+                pass
+
     @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("sig:"))
     def on_signal_asset(call: types.CallbackQuery):
         uid = call.from_user.id
         user = db.get_user_by_telegram_id(uid)
-        if not user or not user.get("premium_active"):
-            try:
-                bot.answer_callback_query(call.id, "Premium required")
-            except Exception:
-                pass
-            return
+        if not _user_has_premium(user):
+            # Allow navigation into timeframes if free sample not yet used today
+            today = datetime.now(timezone.utc).date().isoformat()
+            if FREE_SAMPLES.get(uid) == today:
+                try:
+                    bot.answer_callback_query(call.id, "Free sample used today. Upgrade to premium.")
+                except Exception:
+                    pass
+                return
         asset_code = call.data.split(":", 1)[1]
         try:
             bot.answer_callback_query(call.id)
@@ -477,12 +1394,14 @@ if bot:
     def on_signal_timeframe(call: types.CallbackQuery):
         uid = call.from_user.id
         user = db.get_user_by_telegram_id(uid)
-        if not user or not user.get("premium_active"):
-            try:
-                bot.answer_callback_query(call.id, "Premium required")
-            except Exception:
-                pass
-            return
+        if not _user_has_premium(user):
+            today = datetime.now(timezone.utc).date().isoformat()
+            if FREE_SAMPLES.get(uid) == today:
+                try:
+                    bot.answer_callback_query(call.id, "Free sample used today. Upgrade to premium.")
+                except Exception:
+                    pass
+                return
         _, asset_code, tf = call.data.split(":", 2)
         code_to_pair = {
             "BTCUSDT": "BTC/USDT",
@@ -493,30 +1412,137 @@ if bot:
             "NASDAQ": "NASDAQ",
         }
         pair = code_to_pair.get(asset_code, asset_code)
-        quota = db.consume_signal_by_telegram_id(uid)
-        if not quota.get("ok"):
-            msg = (
-                "❗ Daily signal limit reached and no credits left.\n"
-                "Each extra signal costs ₹150. Contact Support to top-up credits: "
-                f"{utils.escape_html(SUPPORT_CONTACT)}"
-            )
-            utils.send_safe(bot, call.message.chat.id, msg)
-            try:
-                bot.answer_callback_query(call.id)
-            except Exception:
-                pass
-            return
-        text = utils.generate_smart_signal(pair, tf)
+        if _user_has_premium(user):
+            quota = db.consume_signal_by_telegram_id(uid)
+            if not quota.get("ok"):
+                msg = (
+                    "❗ Daily signal limit reached and no credits left.\n"
+                    "Each extra signal costs ₹150. Contact Support to top-up credits: "
+                    f"{utils.escape_html(SUPPORT_CONTACT)}"
+                )
+                utils.send_safe(bot, call.message.chat.id, msg)
+                try:
+                    bot.answer_callback_query(call.id)
+                except Exception:
+                    pass
+                return
+        else:
+            # Mark free sample as used
+            FREE_SAMPLES[uid] = datetime.now(timezone.utc).date().isoformat()
+            quota = {"ok": True, "source": "free", "used_today": 1, "daily_limit": 1, "credits": 0}
+        text = utils.generate_ensemble_signal(pair, tf)
         footer = (
             f"\nRemaining today: {max(quota.get('daily_limit',0)-quota.get('used_today',0),0)} · "
-            f"Credits: {quota.get('credits',0)} ({'daily' if quota.get('source')=='daily' else 'credit'} used)"
+            f"Credits: {quota.get('credits',0)} ({'daily' if quota.get('source')=='daily' else ('credit' if quota.get('source')=='credit' else 'free')} used)"
         )
-        text = text + "\n" + footer
+        # Send base signal immediately
         try:
             bot.answer_callback_query(call.id)
         except Exception:
             pass
-        utils.send_safe(bot, call.message.chat.id, text)
+        try:
+            base_msg = bot.send_message(call.message.chat.id, text + "\n" + footer, reply_markup=build_signal_nav_kb(asset_code))
+            direction = utils.direction_from_signal_text(text) or ""
+            def _fmt2(v):
+                if v is None:
+                    return "-"
+                v = float(v)
+                if v >= 100: return f"{v:.2f}"
+                if v >= 1: return f"{v:.4f}"
+                return f"{v:.6f}"
+            def _after_send2():
+                try:
+                    entry_time_iso = datetime.now(timezone.utc).isoformat()
+                    entry_price = utils.get_entry_price(pair, tf)
+                    if entry_price is None:
+                        for alt in ("1m", "5m", "3m"):
+                            try:
+                                entry_price = utils.get_entry_price(pair, alt)
+                                if entry_price is not None:
+                                    break
+                            except Exception:
+                                pass
+                    if entry_price is None:
+                        try:
+                            entry_price = utils.get_close_at_time(pair, tf, entry_time_iso)
+                        except Exception:
+                            entry_price = None
+                    # Follow-up message for entry
+                    if direction in ("UP", "DOWN"):
+                        details = f"Entry price: <code>{_fmt2(entry_price)}</code> (update in {tf})"
+                    else:
+                        details = f"Entry price: <code>{_fmt2(entry_price)}</code>"
+                    details_msg2 = bot.send_message(call.message.chat.id, details)
+                    # Log served signal
+                    try:
+                        urow = db.get_user_by_telegram_id(uid) or (
+                            db.upsert_user(uid, call.from_user.username or "", call.from_user.first_name or "", call.from_user.last_name or "", call.from_user.language_code or None) or 
+                            db.get_user_by_telegram_id(uid)
+                        )
+                        if urow and hasattr(db, 'insert_signal_log'):
+                            db.insert_signal_log(
+                                user_id=urow.get('id'),
+                                telegram_id=uid,
+                                pair=pair,
+                                timeframe=tf,
+                                direction=direction,
+                                entry_price=entry_price,
+                                source=quota.get('source'),
+                                message_id=getattr(base_msg, 'message_id', None),
+                                raw_text=text,
+                                entry_time=entry_time_iso
+                            )
+                            # Log details line as separate message
+                            db.insert_signal_log(
+                                user_id=urow.get('id'),
+                                telegram_id=uid,
+                                pair=pair,
+                                timeframe=tf,
+                                direction=direction,
+                                entry_price=entry_price,
+                                source='details',
+                                message_id=getattr(details_msg2, 'message_id', None),
+                                raw_text=details,
+                                entry_time=entry_time_iso
+                            )
+                    except Exception:
+                        pass
+                    # Schedule updates only for real trades
+                    try:
+                        if direction in ("UP", "DOWN"):
+                            for tf_label, delay in [("1m", 55), ("3m", 175), ("5m", 295)]:
+                                def _post_update2(tf_label=tf_label, entry_price=entry_price):
+                                    try:
+                                        now_iso = datetime.now(timezone.utc).isoformat()
+                                        new_price = utils.get_entry_price(pair, tf_label)
+                                        if new_price is None:
+                                            for alt in ("1m", "5m"):
+                                                new_price = utils.get_entry_price(pair, alt)
+                                                if new_price is not None:
+                                                    break
+                                        if new_price is None:
+                                            new_price = utils.get_close_at_time(pair, tf_label, now_iso)
+                                        if entry_price is not None and new_price is not None and entry_price:
+                                            ch = (float(new_price) - float(entry_price)) / float(entry_price) * 100.0
+                                            delta = f"{ch:+.2f}%"
+                                        else:
+                                            delta = "-"
+                                        upd = (
+                                            f"⏱ {tf_label} update for {pair}\n"
+                                            f"Entry: <code>{_fmt2(entry_price)}</code> → Now: <code>{_fmt2(new_price)}</code>\n"
+                                            f"Change: {delta}"
+                                        )
+                                        bot.send_message(call.message.chat.id, upd, reply_markup=build_signal_nav_kb(asset_code))
+                                    except Exception:
+                                        pass
+                                threading.Timer(delay, _post_update2).start()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            threading.Thread(target=_after_send2, daemon=True).start()
+        except Exception:
+            pass
 
     # ----- Admin: signal credits and limit -----
     @app.post("/admin/add_credits")
@@ -551,6 +1577,81 @@ if bot:
         db.set_signal_limit_by_user_id(user["id"], limit)
         db.log_admin("set_limit", {"user_id": user["id"], "limit": limit}, performed_by="panel")
         flash("Daily limit updated", "success")
+        return redirect(url_for("admin_users", q=ident))
+
+    @app.post("/admin/delete_chat")
+    @ui_login_required
+    def admin_delete_chat():
+        ident = (request.form.get("ident") or "").strip()
+        max_msgs = int(request.form.get("limit") or 500)
+        full = (request.form.get("full") or "").strip().lower() in ("1", "true", "on", "yes")
+        if not ident:
+            flash("Provide ident", "warning")
+            return redirect(url_for("admin_users", q=ident))
+        user = db.resolve_user_by_ident(ident)
+        if not user:
+            flash("User not found", "danger")
+            return redirect(url_for("admin_users", q=ident))
+        rows = []
+        try:
+            rows = db.list_signal_logs_by_user(user["id"], max_msgs)
+        except Exception:
+            rows = []
+        attempted = len(rows)
+        deleted = 0
+        failed = 0
+        if bot:
+            for r in rows:
+                tg = r.get("telegram_id")
+                mid = r.get("message_id")
+                if not tg or not mid:
+                    continue
+                try:
+                    bot.delete_message(int(tg), int(mid))
+                    deleted += 1
+                except Exception:
+                    failed += 1
+        deleted_extra = 0
+        tg_id = int(user.get("telegram_id") or 0)
+        probe_msg = None
+        if bot and tg_id and (attempted == 0 or deleted < attempted):
+            windows = 3 if full else 1
+            for _ in range(windows):
+                try:
+                    probe_msg = bot.send_message(tg_id, "…")
+                    top_id = getattr(probe_msg, 'message_id', None)
+                    if top_id:
+                        lo = max(int(top_id) - max_msgs, 1)
+                        for mid in range(int(top_id), lo - 1, -1):
+                            try:
+                                bot.delete_message(tg_id, mid)
+                                deleted_extra += 1
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                finally:
+                    if probe_msg is not None:
+                        try:
+                            bot.delete_message(tg_id, int(getattr(probe_msg, 'message_id', 0)))
+                        except Exception:
+                            pass
+        try:
+            db.delete_signal_logs_by_user(user["id"])
+        except Exception:
+            pass
+        db.log_admin("delete_chat", {"user_id": user["id"], "ident": ident, "attempted": attempted, "deleted": deleted, "failed": failed, "deleted_extra": deleted_extra}, performed_by="panel")
+        if deleted_extra:
+            flash(f"Deleted {deleted}/{attempted} via logs + {deleted_extra} via sweep; logs cleared", "success")
+        else:
+            flash(f"Deleted {deleted}/{attempted} messages; logs cleared", "success")
+        try:
+            if bot and tg_id:
+                kb = types.InlineKeyboardMarkup()
+                kb.add(types.InlineKeyboardButton("START", callback_data="menu:get_started"))
+                bot.send_message(tg_id, "Reset complete. Tap START to begin.", reply_markup=kb)
+        except Exception:
+            pass
         return redirect(url_for("admin_users", q=ident))
 
     @app.post("/api/add_credits")
@@ -598,13 +1699,28 @@ def api_users():
 def api_grant():
     d = request.get_json(silent=True) or {}
     ident, days = (d.get("ident") or "").strip(), int(d.get("days") or 0)
-    if not ident or days <= 0: return jsonify({"ok": False, "error": "bad_request"}), 400
+    credits = int(d.get("credits") or 0)
+    if not ident or (days <= 0 and credits == 0): return jsonify({"ok": False, "error": "bad_request"}), 400
     user = db.resolve_user_by_ident(ident)
     if not user: return jsonify({"ok": False, "error": "user_not_found"}), 404
-    new_exp = db.grant_premium_by_user_id(user["id"], days)
-    db.log_admin("grant", {"user_id": user["id"], "ident": ident, "days": days}, performed_by="api")
-    if bot: utils.send_safe(bot, user["telegram_id"], f"🎉 Premium +{days}d. New expiry: <b>{utils.format_ts_iso(new_exp)}</b>")
-    return jsonify({"ok": True, "new_expires_at": utils.to_iso(new_exp)})
+    new_exp = None
+    if days > 0:
+        new_exp = db.grant_premium_by_user_id(user["id"], days)
+    if credits != 0:
+        try:
+            db.add_signal_credits_by_user_id(user["id"], credits)
+        except Exception:
+            pass
+    db.log_admin("grant", {"user_id": user["id"], "ident": ident, "days": days, "credits": credits}, performed_by="api")
+    if bot:
+        parts = []
+        if days > 0:
+            parts.append(f"Premium +{days}d. New expiry: <b>{utils.format_ts_iso(new_exp)}</b>")
+        if credits != 0:
+            parts.append(f"Signal credits {'+' if credits>0 else ''}{credits}")
+        if parts:
+            utils.send_safe(bot, user["telegram_id"], "🎉 " + " \u2022 ".join(parts))
+    return jsonify({"ok": True, "new_expires_at": utils.to_iso(new_exp), "credits_delta": credits})
 
 @app.post("/api/revoke")
 @require_admin

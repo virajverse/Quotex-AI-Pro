@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Verification #{{ v.id }}</h2>
+<div class="card">
+  <div class="row">
+    <div class="col">
+      <div><b>User ID:</b> {{ v.user_id }}</div>
+      <div><b>Method:</b> {{ v.method }}</div>
+      <div><b>Status:</b> {{ v.status }}</div>
+      <div><b>Created:</b> <span class="muted">{{ v.created_at }}</span></div>
+      {% if v.tx_id %}<div><b>tx_id:</b> <code>{{ v.tx_id }}</code></div>{% endif %}
+      {% if v.tx_hash %}<div><b>tx_hash:</b> <code>{{ v.tx_hash }}</code></div>{% endif %}
+      {% if v.order_id %}<div><b>Order:</b> #{{ v.order_id }}</div>{% endif %}
+      {% if order and product %}
+        <div class="muted">Plan: {{ product.name }} ({{ product.days }}d)</div>
+      {% endif %}
+    </div>
+    <div class="col">
+      <form class="inline" method="post" action="/admin/verification/{{v.id}}/approve">
+        <label class="muted">Grant days</label>
+        <input name="days" placeholder="days" value="{% if product and product.days %}{{product.days}}{% else %}30{% endif %}" style="max-width:120px">
+        <label class="muted">Credits</label>
+        <input name="credits" placeholder="credits +/-" style="max-width:120px">
+        <button class="btn ok" type="submit">Approve</button>
+      </form>
+      <form class="inline" method="post" action="/admin/verification/{{v.id}}/reject" onsubmit="return confirm('Reject verification #{{v.id}}?')">
+        <label class="muted">Reason</label>
+        <input name="reason" placeholder="reason" style="max-width:240px">
+        <button class="btn bad" type="submit">Reject</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+{% if v.method=='receipt' %}
+<div class="card">
+  <h3>Receipt</h3>
+  <div class="muted">If sent as photo/document, check your Telegram admin forward.</div>
+</div>
+{% endif %}
+
+{% if user %}
+<div class="card">
+  <h3>User</h3>
+  <div>ID: {{ user.id }}</div>
+  <div>Telegram: {{ user.telegram_id }}</div>
+  <div>Username: @{{ user.username or '' }}</div>
+</div>
+{% endif %}
+{% endblock %}

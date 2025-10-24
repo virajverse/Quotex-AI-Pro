@@ -16,6 +16,69 @@ Single Flask web service with Telegram webhook and admin API. DB: Supabase Postg
 - `railway.json` Railway deploy descriptor
 - `.env.example`, `requirements.txt`
 
+## Local Development (Windows + ngrok)
+
+Follow these steps to run the Flask + Telegram bot locally and expose it to Telegram using ngrok.
+
+1) Prerequisites
+- Python 3.11+
+- Postgres database (Supabase recommended, or local Postgres)
+- ngrok installed and logged in
+
+2) Clone and environment
+- Copy env template:
+  - PowerShell: `Copy-Item .env.example .env`
+  - CMD: `copy .env.example .env`
+- Edit `.env` and set:
+  - `BOT_TOKEN` = your bot token from BotFather
+  - `ADMIN_API_KEY` = any strong string
+  - `SECRET_KEY` = any strong string
+  - `DATABASE_URL` =
+    - Supabase: use the connection string from Supabase (keeps `sslmode=require`)
+    - Local Postgres: `postgresql://user:pass@localhost:5432/dbname?sslmode=disable`
+
+3) Install and run
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python backend/app.py
+```
+The app listens on `http://127.0.0.1:5000` by default (`PORT` env can override).
+
+4) Start ngrok
+```powershell
+ngrok http 5000
+```
+Copy the HTTPS URL printed by ngrok, for example `https://abc123.ngrok.app`.
+
+5) Set webhook
+- Option A (automatic): put the URL in `.env` and restart the app
+  - `WEBHOOK_BASE_URL=https://abc123.ngrok.app`
+  - Restart: `python backend/app.py`
+- Option B (manual): call Telegram API
+```powershell
+$env:BOT_TOKEN="<your-bot-token>"
+$env:WEBHOOK_BASE_URL="https://abc123.ngrok.app"
+curl -s "https://api.telegram.org/bot$env:BOT_TOKEN/setWebhook?url=$env:WEBHOOK_BASE_URL/bot/$env:BOT_TOKEN&drop_pending_updates=true"
+```
+
+6) Test
+- Health: open `http://127.0.0.1:5000/health`
+- Send `/start` to your bot in Telegram. You should get a welcome message.
+- Admin panel: `http://127.0.0.1:5000/admin/login` (login with `ADMIN_API_KEY`)
+
+7) Database
+- Apply schema once to your Postgres:
+```powershell
+psql "<DATABASE_URL>" -f supabase_schema.sql
+```
+
+Tips
+- If ngrok URL changes, update `WEBHOOK_BASE_URL` and set webhook again, or restart the app with the new value.
+- If using local Postgres, ensure `sslmode=disable` is present in `DATABASE_URL` to avoid SSL errors.
+
 ## Setup
 1. Create Supabase Postgres. Run `supabase_schema.sql` in SQL editor.
 2. In Railway project settings, add environment variables from `.env.example`:

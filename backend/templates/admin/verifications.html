@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Verifications</h2>
+<div class="card">
+  <form method="get" action="/admin/verifications">
+    <div class="row">
+      <div class="col">
+        <label class="muted">Status</label>
+        <select name="status">
+          <option value="">All</option>
+          {% for s in ["pending","approved","rejected","auto_pass"] %}
+            <option value="{{s}}" {% if status==s %}selected{% endif %}>{{s}}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col">
+        <label class="muted">Method</label>
+        <select name="method">
+          <option value="">All</option>
+          {% for m in ["upi","usdt_trc20","evm","receipt"] %}
+            <option value="{{m}}" {% if method==m %}selected{% endif %}>{{m}}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col" style="max-width:200px">
+        <label class="muted">&nbsp;</label>
+        <button class="btn" type="submit">Filter</button>
+      </div>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>User</th>
+        <th>Method</th>
+        <th>Status</th>
+        <th>Ref</th>
+        <th>Created</th>
+        <th>Order</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for v in items %}
+      <tr>
+        <td><a href="/admin/verification/{{v.id}}">#{{ v.id }}</a></td>
+        <td>{{ v.user_id }}</td>
+        <td>{{ v.method }}</td>
+        <td>{{ v.status }}</td>
+        <td>
+          {% if v.tx_id %}<div class="muted">tx_id: {{ v.tx_id }}</div>{% endif %}
+          {% if v.tx_hash %}<div class="muted">tx_hash: {{ v.tx_hash[:16] }}...</div>{% endif %}
+          {% if v.method=='receipt' %}<div class="muted">receipt</div>{% endif %}
+        </td>
+        <td class="muted">{{ v.created_at }}</td>
+        <td>{{ v.order_id or '' }}</td>
+        <td>
+          <form class="inline" method="post" action="/admin/verification/{{v.id}}/approve">
+            <input name="days" placeholder="days" value="30" style="max-width:80px">
+            <button class="btn ok" type="submit">Approve</button>
+          </form>
+          <form class="inline" method="post" action="/admin/verification/{{v.id}}/reject" onsubmit="return confirm('Reject verification #{{v.id}}?')">
+            <input name="reason" placeholder="reason" style="max-width:140px">
+            <button class="btn bad" type="submit">Reject</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

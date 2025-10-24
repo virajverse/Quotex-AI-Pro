@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Orders</h2>
+<div class="card">
+  <form method="get" action="/admin/orders">
+    <div class="row">
+      <div class="col">
+        <label class="muted">Status</label>
+        <select name="status">
+          <option value="">All</option>
+          {% for s in ["pending","submitted","approved","rejected"] %}
+            <option value="{{s}}" {% if status==s %}selected{% endif %}>{{s}}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col" style="max-width:200px">
+        <label class="muted">&nbsp;</label>
+        <button class="btn" type="submit">Filter</button>
+      </div>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>User</th>
+        <th>Product</th>
+        <th>Method</th>
+        <th>Status</th>
+        <th>Tx</th>
+        <th>Created</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for o in items %}
+      <tr>
+        <td>#{{ o.id }}</td>
+        <td>{{ o.user_id }}</td>
+        <td>{{ o.product_id or '' }}</td>
+        <td>{{ o.method or '' }}</td>
+        <td>{{ o.status }}</td>
+        <td>
+          {% if o.tx_id %}<div class="muted">tx_id: {{ o.tx_id }}</div>{% endif %}
+          {% if o.tx_hash %}<div class="muted">tx_hash: {{ o.tx_hash[:16] }}...</div>{% endif %}
+        </td>
+        <td class="muted">{{ o.created_at }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

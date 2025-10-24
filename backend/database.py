@@ -101,6 +101,12 @@ def get_user_by_telegram_id(telegram_id: int) -> Optional[Dict[str, Any]]:
         r = cur.fetchone()
         return dict(r) if r else None
 
+def get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT * FROM users WHERE id=%s", (user_id,))
+        r = cur.fetchone()
+        return dict(r) if r else None
+
 def resolve_user_by_ident(ident: str) -> Optional[Dict[str, Any]]:
     ident = (ident or "").strip()
     with get_conn() as c, c.cursor() as cur:
@@ -137,6 +143,24 @@ def search_users_admin(q: str) -> List[Dict[str, Any]]:
             cur.execute("SELECT * FROM users WHERE LOWER(username) LIKE LOWER(%s) OR LOWER(ident) LIKE LOWER(%s) ORDER BY id DESC LIMIT 50", (f"%{q}%", f"%{q}%"))
         return [dict(r) for r in cur.fetchall()]
 
+def list_signal_logs_by_user(user_id: int, limit: int = 1000) -> list[dict]:
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, telegram_id, message_id
+            FROM signal_logs
+            WHERE user_id=%s AND message_id IS NOT NULL
+            ORDER BY id DESC
+            LIMIT %s
+            """,
+            (user_id, limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+def delete_signal_logs_by_user(user_id: int):
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute("DELETE FROM signal_logs WHERE user_id=%s", (user_id,))
+
 def grant_premium_by_user_id(user_id: int, days: int) -> datetime:
     with get_conn() as c, c.cursor() as cur:
         cur.execute("""
@@ -160,6 +184,36 @@ def list_users_for_broadcast(premium_only: bool) -> List[Dict[str, Any]]:
             cur.execute("SELECT id, telegram_id FROM users WHERE premium_active")
         else:
             cur.execute("SELECT id, telegram_id FROM users")
+        return [dict(r) for r in cur.fetchall()]
+
+def list_verifications(status: Optional[str] = None, method: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    with get_conn() as c, c.cursor() as cur:
+        if status and method:
+            cur.execute("SELECT * FROM verifications WHERE status=%s AND method=%s ORDER BY id DESC LIMIT %s", (status, method, limit))
+        elif status:
+            cur.execute("SELECT * FROM verifications WHERE status=%s ORDER BY id DESC LIMIT %s", (status, limit))
+        elif method:
+            cur.execute("SELECT * FROM verifications WHERE method=%s ORDER BY id DESC LIMIT %s", (method, limit))
+        else:
+            cur.execute("SELECT * FROM verifications ORDER BY id DESC LIMIT %s", (limit,))
+        return [dict(r) for r in cur.fetchall()]
+
+def get_verification(verification_id: int) -> Optional[Dict[str, Any]]:
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT * FROM verifications WHERE id=%s", (verification_id,))
+        r = cur.fetchone()
+        return dict(r) if r else None
+
+def set_verification_status(verification_id: int, status: str, notes: Optional[str] = None):
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute("UPDATE verifications SET status=%s, notes=COALESCE(%s, notes), verified_at=NOW() WHERE id=%s", (status, notes, verification_id))
+
+def list_orders(status: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    with get_conn() as c, c.cursor() as cur:
+        if status:
+            cur.execute("SELECT * FROM orders WHERE status=%s ORDER BY id DESC LIMIT %s", (status, limit))
+        else:
+            cur.execute("SELECT * FROM orders ORDER BY id DESC LIMIT %s", (limit,))
         return [dict(r) for r in cur.fetchall()]
 
 def insert_verification(user_id: int, method: str, status: str, tx_id: Optional[str], tx_hash: Optional[str], amount, currency, request_data=None, notes: Optional[str]=None) -> int:
@@ -241,3 +295,190 @@ def add_signal_credits_by_user_id(user_id: int, count: int):
 def set_signal_limit_by_user_id(user_id: int, limit: int):
     with get_conn() as c, c.cursor() as cur:
         cur.execute("UPDATE users SET signal_daily_limit=%s WHERE id=%s", (limit, user_id))
+
+# -------- Served signal logs (Postgres) --------
+def insert_signal_log(user_id: int, telegram_id: int, pair: str, timeframe: str, direction: str, entry_price, source: str | None, message_id: int | None, raw_text: str | None, entry_time: str | None = None) -> int:
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO signal_logs (user_id, telegram_id, pair, timeframe, direction, entry_price, entry_time, source, message_id, raw_text)
+            VALUES (%s,%s,%s,%s,%s,%s,COALESCE(%s, NOW()),%s,%s,%s)
+            RETURNING id
+            """,
+            (user_id, telegram_id, pair, timeframe, direction, entry_price, entry_time, source, message_id, raw_text),
+        )
+        return int(cur.fetchone()["id"])
+
+def update_signal_evaluation(log_id: int, exit_price, exit_time_iso: str | None, pnl_pct: float | None, outcome: str | None):
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE signal_logs
+            SET exit_price=COALESCE(%s, exit_price),
+                exit_time=COALESCE(%s::timestamptz, exit_time),
+                pnl_pct=COALESCE(%s, pnl_pct),
+                outcome=COALESCE(%s, outcome),
+                evaluated_at=NOW()
+            WHERE id=%s
+            """,
+            (exit_price, exit_time_iso, pnl_pct, outcome, log_id),
+        )
+
+def list_signal_logs_since(hours: int = 24, pairs: list[str] | None = None) -> list[dict]:
+    with get_conn() as c, c.cursor() as cur:
+        if pairs:
+            cur.execute(
+                """
+                SELECT * FROM signal_logs
+                WHERE entry_time >= (NOW() - (%s||' hours')::interval)
+                  AND pair = ANY(%s)
+                ORDER BY id DESC
+                """,
+                (hours, pairs),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT * FROM signal_logs
+                WHERE entry_time >= (NOW() - (%s||' hours')::interval)
+                ORDER BY id DESC
+                """,
+                (hours,),
+            )
+        return [dict(r) for r in cur.fetchall()]
+
+# ---------- Products & Orders (Postgres) ----------
+
+def ensure_default_products():
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS products (
+            id BIGSERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            days INT NOT NULL,
+            price_inr NUMERIC(18,2),
+            price_usdt NUMERIC(18,6),
+            active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """)
+        cur.execute("SELECT COUNT(*) c FROM products")
+        if int(cur.fetchone()["c"]) == 0:
+            plans = [
+                ("Weekly", "7-day access", 7, 199.0, 3.0),
+                ("Monthly", "30-day access", 30, 499.0, 7.0),
+                ("Quarterly", "90-day access", 90, 1299.0, 18.0),
+            ]
+            for name, desc, days, inr, usdt in plans:
+                cur.execute(
+                    "INSERT INTO products (name, description, days, price_inr, price_usdt, active) VALUES (%s,%s,%s,%s,%s,TRUE)",
+                    (name, desc, days, inr, usdt),
+                )
+        # Orders table
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            product_id BIGINT REFERENCES products(id) ON DELETE SET NULL,
+            method TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            amount NUMERIC(18,6),
+            currency TEXT,
+            tx_id TEXT,
+            tx_hash TEXT,
+            receipt_file_id TEXT,
+            notes TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """)
+        # Add order_id to verifications if missing
+        try:
+            cur.execute("ALTER TABLE verifications ADD COLUMN order_id BIGINT REFERENCES orders(id)")
+        except Exception:
+            pass
+        # Signal logs (served signals)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS signal_logs (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                telegram_id BIGINT,
+                pair TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                entry_price NUMERIC(24,10),
+                entry_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                source TEXT,
+                message_id BIGINT,
+                raw_text TEXT,
+                exit_price NUMERIC(24,10),
+                exit_time TIMESTAMPTZ,
+                pnl_pct NUMERIC(18,6),
+                outcome TEXT,
+                evaluated_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+
+def list_products(active_only: bool = True):
+    with get_conn() as c, c.cursor() as cur:
+        if active_only:
+            cur.execute("SELECT * FROM products WHERE active ORDER BY id ASC")
+        else:
+            cur.execute("SELECT * FROM products ORDER BY id ASC")
+        return [dict(r) for r in cur.fetchall()]
+
+def get_product(product_id: int):
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT * FROM products WHERE id=%s", (product_id,))
+        r = cur.fetchone()
+        return dict(r) if r else None
+
+def create_order(user_id: int, product_id: int, method: str | None, amount: float | None, currency: str | None, status: str = 'pending') -> int:
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute(
+            "INSERT INTO orders (user_id, product_id, method, status, amount, currency) VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+            (user_id, product_id, method, status, amount, currency),
+        )
+        return int(cur.fetchone()["id"])
+
+def set_order_status(order_id: int, status: str):
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute("UPDATE orders SET status=%s WHERE id=%s", (status, order_id))
+
+def update_order_tx(order_id: int, tx_id: str | None = None, tx_hash: str | None = None):
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute("UPDATE orders SET tx_id=COALESCE(%s, tx_id), tx_hash=COALESCE(%s, tx_hash) WHERE id=%s", (tx_id, tx_hash, order_id))
+
+def update_order_method(order_id: int, method: str):
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute("UPDATE orders SET method=%s WHERE id=%s", (method, order_id))
+
+def update_order_receipt(order_id: int, receipt_file_id: str, caption: str | None):
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute("UPDATE orders SET receipt_file_id=%s, notes=COALESCE(%s, notes) WHERE id=%s", (receipt_file_id, caption, order_id))
+
+def get_latest_pending_order_by_user_and_method(user_id: int, method: str | None):
+    with get_conn() as c, c.cursor() as cur:
+        if method:
+            cur.execute("SELECT * FROM orders WHERE user_id=%s AND status IN ('pending','submitted') AND method=%s ORDER BY id DESC LIMIT 1", (user_id, method))
+        else:
+            cur.execute("SELECT * FROM orders WHERE user_id=%s AND status IN ('pending','submitted') ORDER BY id DESC LIMIT 1", (user_id,))
+        r = cur.fetchone()
+        return dict(r) if r else None
+
+def get_order(order_id: int):
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute("SELECT * FROM orders WHERE id=%s", (order_id,))
+        r = cur.fetchone()
+        return dict(r) if r else None
+
+def update_verification_order(verification_id: int, order_id: int):
+    with get_conn() as c, c.cursor() as cur:
+        try:
+            cur.execute("UPDATE verifications SET order_id=%s WHERE id=%s", (order_id, verification_id))
+        except Exception:
+            # Column may be missing if schema not updated yet
+            pass

@@ -9,8 +9,7 @@ from flask_cors import CORS
 
 import telebot
 from telebot import types
-import psycopg2
-import psycopg2.extras
+import json
 
 try:
     from dotenv import load_dotenv
@@ -723,7 +722,7 @@ def admin_sync_push_all():
                     cur.execute(
                         """
                         INSERT INTO verifications (id, user_id, method, status, tx_id, tx_hash, amount, currency, request_data, notes, created_at, order_id)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, COALESCE(%s, NOW()), %s)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s, CAST(%s AS JSONB), %s, COALESCE(%s, NOW()), %s)
                         ON CONFLICT (id) DO UPDATE SET
                           user_id=EXCLUDED.user_id,
                           method=EXCLUDED.method,
@@ -738,7 +737,7 @@ def admin_sync_push_all():
                         """,
                         (
                             v.get("id"), uid, v.get("method"), v.get("status"), v.get("tx_id"), v.get("tx_hash"), v.get("amount"), v.get("currency"),
-                            psycopg2.extras.Json(v.get("request_data")) if "request_data" in v else None,
+                            json.dumps(v.get("request_data")) if ("request_data" in v and v.get("request_data") is not None) else None,
                             v.get("notes"), v.get("created_at"), v.get("order_id")
                         ),
                     )

@@ -140,6 +140,166 @@ def init_db():
         
         conn.commit()
 
+# -------- More sync helpers (products, orders, verifications, signal_logs) --------
+def list_all_products_full() -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT id, name, description, days, price_inr, price_usdt, active, created_at
+        FROM products ORDER BY id ASC
+        ''')
+        return [dict(r) for r in cursor.fetchall()]
+
+def list_all_orders_full() -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT o.*, u.telegram_id AS src_user_telegram_id
+        FROM orders o
+        JOIN users u ON u.id = o.user_id
+        ORDER BY o.id ASC
+        ''')
+        return [dict(r) for r in cursor.fetchall()]
+
+def list_all_verifications_full() -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT v.*, u.telegram_id AS src_user_telegram_id
+        FROM verifications v
+        JOIN users u ON u.id = v.user_id
+        ORDER BY v.id ASC
+        ''')
+        return [dict(r) for r in cursor.fetchall()]
+
+def list_all_signal_logs_full(limit: int = 100000) -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT id, user_id, telegram_id, pair, timeframe, direction, entry_price, entry_time, source, message_id, raw_text,
+               exit_price, exit_time, pnl_pct, outcome, evaluated_at, created_at
+        FROM signal_logs
+        ORDER BY id ASC
+        LIMIT ?
+        ''', (limit,))
+        return [dict(r) for r in cursor.fetchall()]
+
+def upsert_product_full(row: Dict[str, Any]):
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+        INSERT INTO products (id, name, description, days, price_inr, price_usdt, active, created_at)
+        VALUES (?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET
+            name=excluded.name,
+            description=excluded.description,
+            days=excluded.days,
+            price_inr=excluded.price_inr,
+            price_usdt=excluded.price_usdt,
+            active=excluded.active
+        ''', (
+            row.get('id'), row.get('name'), row.get('description'), row.get('days'),
+            row.get('price_inr'), row.get('price_usdt'),
+            1 if (row.get('active') in (1, True, 't', 'true', '1')) else 0,
+            row.get('created_at')
+        ))
+        conn.commit()
+
+def upsert_order_full(row: Dict[str, Any]):
+    tg = row.get('src_user_telegram_id') or row.get('telegram_id')
+    if not tg:
+        return
+    u = get_user_by_telegram_id(int(tg))
+    if not u:
+        return
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+        INSERT INTO orders (id, user_id, product_id, method, status, amount, currency, tx_id, tx_hash, receipt_file_id, notes, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET
+            user_id=excluded.user_id,
+            product_id=excluded.product_id,
+            method=excluded.method,
+            status=excluded.status,
+            amount=excluded.amount,
+            currency=excluded.currency,
+            tx_id=excluded.tx_id,
+            tx_hash=excluded.tx_hash,
+            receipt_file_id=excluded.receipt_file_id,
+            notes=COALESCE(excluded.notes, notes)
+        ''', (
+            row.get('id'), u.get('id'), row.get('product_id'), row.get('method'), row.get('status'),
+            row.get('amount'), row.get('currency'), row.get('tx_id'), row.get('tx_hash'), row.get('receipt_file_id'), row.get('notes'), row.get('created_at')
+        ))
+        conn.commit()
+
+def upsert_verification_full(row: Dict[str, Any]):
+    tg = row.get('src_user_telegram_id') or row.get('telegram_id')
+    if not tg:
+        return
+    u = get_user_by_telegram_id(int(tg))
+    if not u:
+        return
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+        INSERT INTO verifications (id, user_id, method, status, tx_id, tx_hash, amount, currency, request_data, notes, created_at, order_id)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET
+            user_id=excluded.user_id,
+            method=excluded.method,
+            status=excluded.status,
+            tx_id=excluded.tx_id,
+            tx_hash=excluded.tx_hash,
+            amount=excluded.amount,
+            currency=excluded.currency,
+            request_data=COALESCE(excluded.request_data, request_data),
+            notes=COALESCE(excluded.notes, notes),
+            order_id=COALESCE(excluded.order_id, order_id)
+        ''', (
+            row.get('id'), u.get('id'), row.get('method'), row.get('status'), row.get('tx_id'), row.get('tx_hash'),
+            row.get('amount'), row.get('currency'),
+            (row.get('request_data') if isinstance(row.get('request_data'), str) else str(row.get('request_data')) if row.get('request_data') is not None else None),
+            row.get('notes'), row.get('created_at'), row.get('order_id')
+        ))
+        conn.commit()
+
+def insert_signal_log_full(row: Dict[str, Any]):
+    tg = row.get('telegram_id') or row.get('src_user_telegram_id')
+    if not tg:
+        return
+    u = get_user_by_telegram_id(int(tg))
+    if not u:
+        return
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+        INSERT INTO signal_logs (id, user_id, telegram_id, pair, timeframe, direction, entry_price, entry_time, source, message_id, raw_text,
+                                 exit_price, exit_time, pnl_pct, outcome, evaluated_at, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET
+            user_id=excluded.user_id,
+            telegram_id=excluded.telegram_id,
+            pair=excluded.pair,
+            timeframe=excluded.timeframe,
+            direction=excluded.direction,
+            entry_price=excluded.entry_price,
+            entry_time=excluded.entry_time,
+            source=excluded.source,
+            message_id=excluded.message_id,
+            raw_text=excluded.raw_text,
+            exit_price=excluded.exit_price,
+            exit_time=excluded.exit_time,
+            pnl_pct=excluded.pnl_pct,
+            outcome=excluded.outcome,
+            evaluated_at=excluded.evaluated_at
+        ''', (
+            row.get('id'), u.get('id'), int(tg), row.get('pair'), row.get('timeframe'), row.get('direction'), row.get('entry_price'), row.get('entry_time'),
+            row.get('source'), row.get('message_id'), row.get('raw_text'), row.get('exit_price'), row.get('exit_time'), row.get('pnl_pct'), row.get('outcome'), row.get('evaluated_at'), row.get('created_at')
+        ))
+        conn.commit()
+
 # Initialize database on import
 init_db()
 
@@ -599,6 +759,65 @@ def expire_past_due() -> int:
         cursor.execute('UPDATE users SET is_premium = 0 WHERE is_premium = 1 AND premium_until < CURRENT_TIMESTAMP')
         conn.commit()
         return cursor.rowcount if hasattr(cursor, 'rowcount') else 0
+
+# -------- Sync helpers (SQLite full rows) --------
+def list_all_users_full() -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT id, telegram_id, username, first_name, last_name, lang_code,
+               is_premium, premium_until,
+               created_at, last_active, last_message,
+               signal_credits, signal_daily_used, signal_daily_limit, signal_last_used_date
+        FROM users
+        ORDER BY id ASC
+        ''')
+        return [dict(r) for r in cursor.fetchall()]
+
+def upsert_user_full(row: Dict[str, Any]):
+    tg = int(row.get('telegram_id')) if row.get('telegram_id') else None
+    if not tg:
+        return
+    username = (row.get('username') or '').strip()
+    first_name = row.get('first_name')
+    last_name = row.get('last_name')
+    lang_code = row.get('lang_code')
+    # Map PG -> SQLite
+    is_premium = 1 if row.get('premium_active') or row.get('is_premium') else 0
+    premium_until = row.get('premium_expires_at') or row.get('premium_until')
+    last_active = row.get('last_seen_at') or row.get('last_active')
+    last_message = row.get('last_message_at') or row.get('last_message')
+    created_at = row.get('created_at')
+    signal_daily_limit = row.get('signal_daily_limit') or 0
+    signal_daily_used = row.get('signal_used_today') or row.get('signal_daily_used') or 0
+    signal_last_used_date = row.get('signal_day') or row.get('signal_last_used_date')
+    signal_credits = row.get('signal_credits') or 0
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+        INSERT INTO users (telegram_id, username, first_name, last_name, lang_code,
+                           is_premium, premium_until, created_at, last_active, last_message,
+                           signal_credits, signal_daily_used, signal_daily_limit, signal_last_used_date)
+        VALUES (?,?,?,?,?, ?,?,?,?, ?,?,?,?,?)
+        ON CONFLICT(telegram_id) DO UPDATE SET
+            username=excluded.username,
+            first_name=excluded.first_name,
+            last_name=excluded.last_name,
+            lang_code=COALESCE(excluded.lang_code, lang_code),
+            is_premium=excluded.is_premium,
+            premium_until=excluded.premium_until,
+            last_active=COALESCE(excluded.last_active, last_active),
+            last_message=COALESCE(excluded.last_message, last_message),
+            signal_credits=excluded.signal_credits,
+            signal_daily_used=excluded.signal_daily_used,
+            signal_daily_limit=excluded.signal_daily_limit,
+            signal_last_used_date=excluded.signal_last_used_date
+        ''', (
+            tg, username, first_name, last_name, lang_code,
+            is_premium, premium_until, created_at, last_active, last_message,
+            int(signal_credits), int(signal_daily_used), int(signal_daily_limit), signal_last_used_date
+        ))
+        conn.commit()
 
 def add_signal_credits_by_user_id(user_id: int, count: int):
     with get_conn() as conn:

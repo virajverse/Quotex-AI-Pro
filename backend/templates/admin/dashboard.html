@@ -35,4 +35,31 @@
     <span class="muted">(idempotent)</span>
   </form>
 </div>
+
+<div class="card">
+  <h3>Sync (SQLite ↔ Supabase)</h3>
+  <div class="row">
+    <div class="col">
+      <form action="/admin/sync/push_users" method="post">
+        <button class="btn" type="submit">Push users → Supabase</button>
+      </form>
+    </div>
+    <div class="col">
+      <form action="/admin/sync/pull_users" method="post">
+        <button class="btn" type="submit">Pull users ← Supabase</button>
+      </form>
+    </div>
+    <div class="col">
+      <form action="/admin/sync/push_all" method="post">
+        <button class="btn ok" type="submit">Push ALL tables → Supabase</button>
+      </form>
+    </div>
+    <div class="col">
+      <form action="/admin/sync/pull_all" method="post">
+        <button class="btn warn" type="submit">Pull ALL tables ← Supabase</button>
+      </form>
+    </div>
+  </div>
+  <div class="muted" style="margin-top:8px">Requires DATABASE_URL configured for Supabase. Push copies local SQLite users to Supabase. Pull copies Supabase users into local SQLite.</div>
+</div>
 {% endblock %}

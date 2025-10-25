@@ -75,6 +75,69 @@ def get_stats() -> Dict[str, Any]:
         r = cur.fetchone()
         return {"total_users": total, "active_premium": active, "expiring_1d": int(r["expiring_1d"]), "expiring_3d": int(r["expiring_3d"])}
 
+def list_all_users_full() -> List[Dict[str, Any]]:
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, telegram_id, ident, username, first_name, last_name, lang_code,
+                   premium_active, premium_expires_at,
+                   signal_daily_limit, signal_used_today, signal_day, signal_credits,
+                   last_seen_at, last_message_at, created_at, updated_at
+            FROM users
+            ORDER BY id ASC
+            """
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+def list_all_products_full() -> List[Dict[str, Any]]:
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, name, description, days, price_inr, price_usdt, active, created_at
+            FROM products
+            ORDER BY id ASC
+            """
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+def list_all_orders_full() -> List[Dict[str, Any]]:
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT o.*, u.telegram_id AS src_user_telegram_id
+            FROM orders o
+            JOIN users u ON u.id = o.user_id
+            ORDER BY o.id ASC
+            """
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+def list_all_verifications_full() -> List[Dict[str, Any]]:
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT v.*, u.telegram_id AS src_user_telegram_id
+            FROM verifications v
+            JOIN users u ON u.id = v.user_id
+            ORDER BY v.id ASC
+            """
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+def list_all_signal_logs_full(limit: int = 100000) -> List[Dict[str, Any]]:
+    with get_conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, user_id, telegram_id, pair, timeframe, direction, entry_price, entry_time, source, message_id, raw_text,
+                   exit_price, exit_time, pnl_pct, outcome, evaluated_at, created_at
+            FROM signal_logs
+            ORDER BY id ASC
+            LIMIT %s
+            """,
+            (limit,)
+        )
+        return [dict(r) for r in cur.fetchall()]
+
 def upsert_user(telegram_id: int, username: str, first_name: str, last_name: str, lang_code: Optional[str]):
     username = (username or "").strip()
     ident = f"@{username.lower()}" if username else f"tg:{telegram_id}"

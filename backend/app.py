@@ -59,6 +59,19 @@ CORS(app, resources={r"/*": {"origins": os.getenv("FRONTEND_ORIGIN", "*")}})
 
 FREE_SAMPLES: dict[int, str] = {}
 
+# ---- Sync readiness helpers ----
+def _pdb_ready() -> bool:
+    try:
+        return bool(pdb) and bool(getattr(pdb, "pool", None))
+    except Exception:
+        return False
+
+def _sdb_ready() -> bool:
+    try:
+        return bool(sdb)
+    except Exception:
+        return False
+
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").strip()
@@ -455,10 +468,10 @@ def admin_cron():
 @app.post("/admin/sync/push_users")
 @ui_login_required
 def admin_sync_push_users():
-    if not pdb:
+    if not _pdb_ready():
         flash("Supabase DATABASE_URL not configured.", "danger")
         return redirect(url_for("admin_dashboard"))
-    if not sdb:
+    if not _sdb_ready():
         flash("Local SQLite not available.", "danger")
         return redirect(url_for("admin_dashboard"))
     rows = []
@@ -525,15 +538,16 @@ def admin_sync_push_users():
     except Exception:
         logger.exception("sync push users failed")
     db.log_admin("sync_push_users", {"pushed": pushed}, performed_by="panel")
+    flash(f"Pushed {pushed} users to Supabase", "success")
     return redirect(url_for("admin_dashboard"))
 
 @app.post("/admin/sync/pull_users")
 @ui_login_required
 def admin_sync_pull_users():
-    if not pdb:
+    if not _pdb_ready():
         flash("Supabase DATABASE_URL not configured.", "danger")
         return redirect(url_for("admin_dashboard"))
-    if not sdb:
+    if not _sdb_ready():
         flash("Local SQLite not available.", "danger")
         return redirect(url_for("admin_dashboard"))
     rows = []
@@ -555,7 +569,7 @@ def admin_sync_pull_users():
 @app.post("/admin/sync/pull_all")
 @ui_login_required
 def admin_sync_pull_all():
-    if not (pdb and sdb):
+    if not _pdb_ready() or not _sdb_ready():
         flash("Configure Supabase DATABASE_URL and ensure local SQLite is available.", "danger")
         return redirect(url_for("admin_dashboard"))
     counts = {"users": 0, "products": 0, "orders": 0, "verifications": 0, "signal_logs": 0}
@@ -616,7 +630,7 @@ def admin_sync_pull_all():
 @app.post("/admin/sync/push_all")
 @ui_login_required
 def admin_sync_push_all():
-    if not (pdb and sdb):
+    if not _pdb_ready() or not _sdb_ready():
         flash("Configure Supabase DATABASE_URL and ensure local SQLite is available.", "danger")
         return redirect(url_for("admin_dashboard"))
     counts = {"users": 0, "products": 0, "orders": 0, "verifications": 0, "signal_logs": 0}

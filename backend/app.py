@@ -27,32 +27,9 @@ try:
 except Exception:
     pass
 
-# Dynamic DB backend: Postgres if DATABASE_URL set, else SQLite
+# Database backend: SQLite only (Supabase/Postgres removed)
 from . import utils
-try:
-    # Optional dual-DB access for sync operations
-    from . import sqlite_db as sdb
-except Exception:
-    sdb = None
-try:
-    from . import database as pdb
-except Exception:
-    pdb = None
-try:
-    if os.getenv("DATABASE_URL", "").strip():
-        from . import database as pgdb
-        # If Postgres is reachable, use it; otherwise fallback to SQLite for primary db
-        use_pg = False
-        try:
-            if hasattr(pgdb, "ping") and pgdb.ping():
-                use_pg = True
-        except Exception:
-            use_pg = False
-        db = pgdb if use_pg else sdb
-    else:
-        from . import sqlite_db as db
-except Exception:
-    from . import sqlite_db as db
+from . import sqlite_db as db
 
 # Initialize/seed if available
 try:
@@ -70,23 +47,6 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": os.getenv("FRONTEND_ORIGIN", "*")}})
 
 FREE_SAMPLES: dict[int, str] = {}
-
-# ---- Sync readiness helpers ----
-def _pdb_ready() -> bool:
-    try:
-        if not pdb:
-            return False
-        if hasattr(pdb, "ping"):
-            return bool(pdb.ping())
-        return bool(getattr(pdb, "pool", None))
-    except Exception:
-        return False
-
-def _sdb_ready() -> bool:
-    try:
-        return bool(sdb)
-    except Exception:
-        return False
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
@@ -481,379 +441,11 @@ def admin_cron():
     flash(f"Cron run: notices={result.get('notices')} expired={result.get('expired')}", "success")
     return redirect(url_for("admin_dashboard"))
 
-@app.post("/admin/sync/push_users")
-@ui_login_required
-def admin_sync_push_users():
-    if not _pdb_ready():
-        flash("Supabase DATABASE_URL not configured.", "danger")
-        return redirect(url_for("admin_dashboard"))
-    if not _sdb_ready():
-        flash("Local SQLite not available.", "danger")
-        return redirect(url_for("admin_dashboard"))
-    rows = []
-    try:
-        # Pull all local users (SQLite)
-        rows = sdb.list_all_users_full()
-    except Exception:
-        rows = []
-    pushed = 0
-    try:
-        from datetime import datetime
-        with pdb.get_conn() as c, c.cursor() as cur:
-            for r in rows:
-                tg = r.get("telegram_id")
-                if not tg:
-                    continue
-                username = (r.get("username") or "").strip()
-                ident = (f"@{username.lower()}" if username else f"tg:{tg}")
-                cur.execute(
-                    """
-                    INSERT INTO users (telegram_id, ident, username, first_name, last_name, lang_code,
-                                       premium_active, premium_expires_at,
-                                       signal_daily_limit, signal_used_today, signal_day, signal_credits,
-                                       last_seen_at, last_message_at, created_at, updated_at)
-                    VALUES (%s,%s, NULLIF(%s,''), %s,%s,%s,
-                            %s, %s,
-                            %s, %s, %s, %s,
-                            %s, %s, COALESCE(%s, NOW()), NOW())
-                    ON CONFLICT (telegram_id) DO UPDATE SET
-                      ident=EXCLUDED.ident,
-                      username=EXCLUDED.username,
-                      first_name=EXCLUDED.first_name,
-                      last_name=EXCLUDED.last_name,
-                      lang_code=EXCLUDED.lang_code,
-                      premium_active=EXCLUDED.premium_active,
-                      premium_expires_at=EXCLUDED.premium_expires_at,
-                      signal_daily_limit=EXCLUDED.signal_daily_limit,
-                      signal_used_today=EXCLUDED.signal_used_today,
-                      signal_day=EXCLUDED.signal_day,
-                      signal_credits=EXCLUDED.signal_credits,
-                      last_seen_at=COALESCE(EXCLUDED.last_seen_at, users.last_seen_at),
-                      last_message_at=COALESCE(EXCLUDED.last_message_at, users.last_message_at),
-                      updated_at=NOW()
-                    """,
-                    (
-                        tg,
-                        ident,
-                        username,
-                        r.get("first_name"),
-                        r.get("last_name"),
-                        r.get("lang_code"),
-                        bool(r.get("is_premium", False)),
-                        r.get("premium_until"),
-                        int(r.get("signal_daily_limit") or 0),
-                        int(r.get("signal_daily_used") or 0),
-                        r.get("signal_last_used_date"),
-                        int(r.get("signal_credits") or 0),
-                        r.get("last_active"),
-                        r.get("last_message"),
-                        r.get("created_at"),
-                    ),
-                )
-                pushed += 1
-    except Exception:
-        logger.exception("sync push users failed")
-    db.log_admin("sync_push_users", {"pushed": pushed}, performed_by="panel")
-    flash(f"Pushed {pushed} users to Supabase", "success")
-    return redirect(url_for("admin_dashboard"))
-
-@app.post("/admin/sync/pull_users")
-@ui_login_required
-def admin_sync_pull_users():
-    if not _pdb_ready():
-        flash("Supabase DATABASE_URL not configured.", "danger")
-        return redirect(url_for("admin_dashboard"))
-    if not _sdb_ready():
-        flash("Local SQLite not available.", "danger")
-        return redirect(url_for("admin_dashboard"))
-    rows = []
-    try:
-        rows = pdb.list_all_users_full()
-    except Exception:
-        rows = []
-    pulled = 0
-    for r in rows:
-        try:
-            sdb.upsert_user_full(r)
-            pulled += 1
-        except Exception:
-            pass
-    db.log_admin("sync_pull_users", {"pulled": pulled}, performed_by="panel")
-    flash(f"Pulled {pulled} users from Supabase", "success")
-    return redirect(url_for("admin_dashboard"))
-
-@app.post("/admin/sync/pull_all")
-@ui_login_required
-def admin_sync_pull_all():
-    if not _pdb_ready() or not _sdb_ready():
-        flash("Configure Supabase DATABASE_URL and ensure local SQLite is available.", "danger")
-        return redirect(url_for("admin_dashboard"))
-    counts = {"users": 0, "products": 0, "orders": 0, "verifications": 0, "signal_logs": 0}
-    # Users
-    try:
-        for r in pdb.list_all_users_full():
-            try:
-                sdb.upsert_user_full(r)
-                counts["users"] += 1
-            except Exception:
-                pass
-    except Exception:
-        logger.exception("pull users failed")
-    # Products
-    try:
-        for p in pdb.list_all_products_full():
-            try:
-                sdb.upsert_product_full(p)
-                counts["products"] += 1
-            except Exception:
-                pass
-    except Exception:
-        logger.exception("pull products failed")
-    # Orders
-    try:
-        for o in pdb.list_all_orders_full():
-            try:
-                sdb.upsert_order_full(o)
-                counts["orders"] += 1
-            except Exception:
-                pass
-    except Exception:
-        logger.exception("pull orders failed")
-    # Verifications
-    try:
-        for v in pdb.list_all_verifications_full():
-            try:
-                sdb.upsert_verification_full(v)
-                counts["verifications"] += 1
-            except Exception:
-                pass
-    except Exception:
-        logger.exception("pull verifications failed")
-    # Signal logs
-    try:
-        for sl in pdb.list_all_signal_logs_full():
-            try:
-                sdb.insert_signal_log_full(sl)
-                counts["signal_logs"] += 1
-            except Exception:
-                pass
-    except Exception:
-        logger.exception("pull signal_logs failed")
-    db.log_admin("sync_pull_all", counts, performed_by="panel")
-    flash(f"Pull complete: {counts}", "success")
-    return redirect(url_for("admin_dashboard"))
-
-@app.post("/admin/sync/push_all")
-@ui_login_required
-def admin_sync_push_all():
-    if not _pdb_ready() or not _sdb_ready():
-        flash("Configure Supabase DATABASE_URL and ensure local SQLite is available.", "danger")
-        return redirect(url_for("admin_dashboard"))
-    counts = {"users": 0, "products": 0, "orders": 0, "verifications": 0, "signal_logs": 0}
-    try:
-        with pdb.get_conn() as c, c.cursor() as cur:
-            # Users
-            try:
-                for r in sdb.list_all_users_full():
-                    tg = r.get("telegram_id")
-                    if not tg:
-                        continue
-                    username = (r.get("username") or "").strip()
-                    ident = (f"@{username.lower()}" if username else f"tg:{tg}")
-                    cur.execute(
-                        """
-                        INSERT INTO users (telegram_id, ident, username, first_name, last_name, lang_code,
-                                           premium_active, premium_expires_at,
-                                           signal_daily_limit, signal_used_today, signal_day, signal_credits,
-                                           last_seen_at, last_message_at, created_at, updated_at)
-                        VALUES (%s,%s, NULLIF(%s,''), %s,%s,%s,
-                                %s, %s,
-                                %s, %s, %s, %s,
-                                %s, %s, COALESCE(%s, NOW()), NOW())
-                        ON CONFLICT (telegram_id) DO UPDATE SET
-                          ident=EXCLUDED.ident,
-                          username=EXCLUDED.username,
-                          first_name=EXCLUDED.first_name,
-                          last_name=EXCLUDED.last_name,
-                          lang_code=EXCLUDED.lang_code,
-                          premium_active=EXCLUDED.premium_active,
-                          premium_expires_at=EXCLUDED.premium_expires_at,
-                          signal_daily_limit=EXCLUDED.signal_daily_limit,
-                          signal_used_today=EXCLUDED.signal_used_today,
-                          signal_day=EXCLUDED.signal_day,
-                          signal_credits=EXCLUDED.signal_credits,
-                          last_seen_at=COALESCE(EXCLUDED.last_seen_at, users.last_seen_at),
-                          last_message_at=COALESCE(EXCLUDED.last_message_at, users.last_message_at),
-                          updated_at=NOW()
-                        """,
-                        (
-                            tg,
-                            ident,
-                            username,
-                            r.get("first_name"),
-                            r.get("last_name"),
-                            r.get("lang_code"),
-                            bool(r.get("is_premium", False)),
-                            r.get("premium_until"),
-                            int(r.get("signal_daily_limit") or 0),
-                            int(r.get("signal_daily_used") or 0),
-                            r.get("signal_last_used_date"),
-                            int(r.get("signal_credits") or 0),
-                            r.get("last_active"),
-                            r.get("last_message"),
-                            r.get("created_at"),
-                        ),
-                    )
-                    counts["users"] += 1
-            except Exception:
-                logger.exception("push users failed")
-            # Products
-            try:
-                for p in sdb.list_all_products_full():
-                    cur.execute(
-                        """
-                        INSERT INTO products (id, name, description, days, price_inr, price_usdt, active, created_at)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s, COALESCE(%s, NOW()))
-                        ON CONFLICT (id) DO UPDATE SET
-                          name=EXCLUDED.name,
-                          description=EXCLUDED.description,
-                          days=EXCLUDED.days,
-                          price_inr=EXCLUDED.price_inr,
-                          price_usdt=EXCLUDED.price_usdt,
-                          active=EXCLUDED.active
-                        """,
-                        (
-                            p.get("id"), p.get("name"), p.get("description"), p.get("days"), p.get("price_inr"), p.get("price_usdt"), bool(p.get("active")), p.get("created_at")
-                        ),
-                    )
-                    counts["products"] += 1
-            except Exception:
-                logger.exception("push products failed")
-            # Orders
-            try:
-                for o in sdb.list_all_orders_full():
-                    tg = o.get("src_user_telegram_id")
-                    if not tg:
-                        continue
-                    cur.execute("SELECT id FROM users WHERE telegram_id=%s", (int(tg),))
-                    ru = cur.fetchone()
-                    if not ru:
-                        continue
-                    uid = int(ru["id"]) if isinstance(ru, dict) else int(ru[0])
-                    cur.execute(
-                        """
-                        INSERT INTO orders (id, user_id, product_id, method, status, amount, currency, tx_id, tx_hash, receipt_file_id, notes, created_at)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, COALESCE(%s, NOW()))
-                        ON CONFLICT (id) DO UPDATE SET
-                          user_id=EXCLUDED.user_id,
-                          product_id=EXCLUDED.product_id,
-                          method=EXCLUDED.method,
-                          status=EXCLUDED.status,
-                          amount=EXCLUDED.amount,
-                          currency=EXCLUDED.currency,
-                          tx_id=EXCLUDED.tx_id,
-                          tx_hash=EXCLUDED.tx_hash,
-                          receipt_file_id=EXCLUDED.receipt_file_id,
-                          notes=COALESCE(EXCLUDED.notes, orders.notes)
-                        """,
-                        (
-                            o.get("id"), uid, o.get("product_id"), o.get("method"), o.get("status"), o.get("amount"), o.get("currency"), o.get("tx_id"), o.get("tx_hash"), o.get("receipt_file_id"), o.get("notes"), o.get("created_at")
-                        ),
-                    )
-                    counts["orders"] += 1
-            except Exception:
-                logger.exception("push orders failed")
-            # Verifications
-            try:
-                for v in sdb.list_all_verifications_full():
-                    tg = v.get("src_user_telegram_id")
-                    if not tg:
-                        continue
-                    cur.execute("SELECT id FROM users WHERE telegram_id=%s", (int(tg),))
-                    ru = cur.fetchone()
-                    if not ru:
-                        continue
-                    uid = int(ru["id"]) if isinstance(ru, dict) else int(ru[0])
-                    cur.execute(
-                        """
-                        INSERT INTO verifications (id, user_id, method, status, tx_id, tx_hash, amount, currency, request_data, notes, created_at, order_id)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s, CAST(%s AS JSONB), %s, COALESCE(%s, NOW()), %s)
-                        ON CONFLICT (id) DO UPDATE SET
-                          user_id=EXCLUDED.user_id,
-                          method=EXCLUDED.method,
-                          status=EXCLUDED.status,
-                          tx_id=EXCLUDED.tx_id,
-                          tx_hash=EXCLUDED.tx_hash,
-                          amount=EXCLUDED.amount,
-                          currency=EXCLUDED.currency,
-                          request_data=COALESCE(EXCLUDED.request_data, verifications.request_data),
-                          notes=COALESCE(EXCLUDED.notes, verifications.notes),
-                          order_id=COALESCE(EXCLUDED.order_id, verifications.order_id)
-                        """,
-                        (
-                            v.get("id"), uid, v.get("method"), v.get("status"), v.get("tx_id"), v.get("tx_hash"), v.get("amount"), v.get("currency"),
-                            json.dumps(v.get("request_data")) if ("request_data" in v and v.get("request_data") is not None) else None,
-                            v.get("notes"), v.get("created_at"), v.get("order_id")
-                        ),
-                    )
-                    counts["verifications"] += 1
-            except Exception:
-                logger.exception("push verifications failed")
-            # Signal logs
-            try:
-                for sl in sdb.list_all_signal_logs_full():
-                    tg = sl.get("telegram_id")
-                    if not tg:
-                        continue
-                    cur.execute("SELECT id FROM users WHERE telegram_id=%s", (int(tg),))
-                    ru = cur.fetchone()
-                    if not ru:
-                        continue
-                    uid = int(ru["id"]) if isinstance(ru, dict) else int(ru[0])
-                    cur.execute(
-                        """
-                        INSERT INTO signal_logs (id, user_id, telegram_id, pair, timeframe, direction, entry_price, entry_time, source, message_id, raw_text,
-                                                 exit_price, exit_time, pnl_pct, outcome, evaluated_at, created_at)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s, COALESCE(%s, NOW()), %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, NOW()))
-                        ON CONFLICT (id) DO UPDATE SET
-                          user_id=EXCLUDED.user_id,
-                          telegram_id=EXCLUDED.telegram_id,
-                          pair=EXCLUDED.pair,
-                          timeframe=EXCLUDED.timeframe,
-                          direction=EXCLUDED.direction,
-                          entry_price=EXCLUDED.entry_price,
-                          entry_time=EXCLUDED.entry_time,
-                          source=EXCLUDED.source,
-                          message_id=EXCLUDED.message_id,
-                          raw_text=EXCLUDED.raw_text,
-                          exit_price=EXCLUDED.exit_price,
-                          exit_time=EXCLUDED.exit_time,
-                          pnl_pct=EXCLUDED.pnl_pct,
-                          outcome=EXCLUDED.outcome,
-                          evaluated_at=EXCLUDED.evaluated_at
-                        """,
-                        (
-                            sl.get("id"), uid, int(tg), sl.get("pair"), sl.get("timeframe"), sl.get("direction"), sl.get("entry_price"), sl.get("entry_time"),
-                            sl.get("source"), sl.get("message_id"), sl.get("raw_text"), sl.get("exit_price"), sl.get("exit_time"), sl.get("pnl_pct"), sl.get("outcome"), sl.get("evaluated_at"), sl.get("created_at")
-                        ),
-                    )
-                    counts["signal_logs"] += 1
-            except Exception:
-                logger.exception("push signal_logs failed")
-    except Exception:
-        logger.exception("push_all failed")
-    db.log_admin("sync_push_all", counts, performed_by="panel")
-    flash(f"Push complete: {counts}", "success")
-    return redirect(url_for("admin_dashboard"))
-
 @app.get("/admin/db/download")
 @ui_login_required
 def admin_db_download():
     try:
-        if not _sdb_ready():
-            flash("Local SQLite not available.", "danger")
-            return redirect(url_for("admin_dashboard"))
-        path = getattr(sdb, "DB_PATH", None)
+        path = getattr(db, "DB_PATH", None)
         if not path or not os.path.exists(path):
             return send_file(io.BytesIO(b""), as_attachment=True, download_name="bot.db")
         return send_file(path, as_attachment=True, download_name=os.path.basename(path))
@@ -866,15 +458,12 @@ def admin_db_download():
 @ui_login_required
 def admin_db_upload():
     try:
-        if not _sdb_ready():
-            flash("Local SQLite not available.", "danger")
-            return redirect(url_for("admin_dashboard"))
         f = request.files.get("file")
         if not f or not f.filename:
             flash("Choose a file", "warning")
             return redirect(url_for("admin_dashboard"))
         fn = secure_filename(f.filename)
-        dst = getattr(sdb, "DB_PATH", None)
+        dst = getattr(db, "DB_PATH", None)
         if not dst:
             flash("SQLite path unavailable", "danger")
             return redirect(url_for("admin_dashboard"))
@@ -976,24 +565,35 @@ if bot:
         kb.add(types.InlineKeyboardButton("⚠️ RISK DISCLAIMER", callback_data="menu:disclaimer"))
         return kb
 
+    # --- Assets: OTC vs LIVE (user-provided FX list) ---
+    PAIRS_BASE = [
+        "USD/COP","USD/INR","USD/ARS","USD/BDT","USD/DZD","USD/BRL","GBP/USD","EUR/GBP","NZD/CAD",
+        "USD/EGP","EUR/NZD","USD/IDR","CHF/JPY","USD/MXN","EUR/AUD","AUD/JPY","CAD/CHF","USD/CAD",
+        "AUD/CAD","EUR/CHF","AUD/NZD","USD/NGN","NZD/JPY","AUD/USD","EUR/CAD","EUR/JPY","EUR/USD",
+        "GBP/AUD","GBP/JPY","NZD/CHF","USD/CHF","USD/JPY","USD/PKR","USD/TRY","NZD/USD","USD/PHP",
+        "CAD/JPY","GBP/CAD","USD/ZAR","EUR/SGD","GBP/CHF","GBP/NZD",
+    ]
+
     def build_assets_kb():
         kb = types.InlineKeyboardMarkup(row_width=2)
         kb.add(
-            types.InlineKeyboardButton("BTC/USDT", callback_data="sig:BTCUSDT"),
-            types.InlineKeyboardButton("ETH/USDT", callback_data="sig:ETHUSDT"),
-        )
-        kb.add(
-            types.InlineKeyboardButton("EUR/USD", callback_data="sig:EURUSD"),
-            types.InlineKeyboardButton("GBP/JPY", callback_data="sig:GBPJPY"),
-        )
-        kb.add(
-            types.InlineKeyboardButton("GOLD", callback_data="sig:GOLD"),
-            types.InlineKeyboardButton("NASDAQ", callback_data="sig:NASDAQ"),
+            types.InlineKeyboardButton("OTC FX", callback_data="assets:otc"),
+            types.InlineKeyboardButton("LIVE FX", callback_data="assets:live"),
         )
         kb.add(
             types.InlineKeyboardButton("🏠 Main Menu", callback_data="menu:root"),
             types.InlineKeyboardButton("👤 Profile", callback_data="menu:profile"),
         )
+        return kb
+
+    def build_assets_list_kb(category: str):
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        for p in PAIRS_BASE:
+            code = p.replace("/", "")
+            label = f"{p} (OTC)" if category == "otc" else p
+            cb = f"sig:{code}_OTC" if category == "otc" else f"sig:{code}"
+            kb.add(types.InlineKeyboardButton(label, callback_data=cb))
+        kb.add(types.InlineKeyboardButton("⬅️ Back", callback_data="back:assets"))
         return kb
 
     def build_timeframes_kb(asset_code: str):
@@ -1050,10 +650,8 @@ if bot:
     SIGNAL_LAST: dict[int, str] = {}
 
     def build_assets_reply_kb():
-        kb = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-        kb.add(types.KeyboardButton("BTC/USDT"), types.KeyboardButton("ETH/USDT"))
-        kb.add(types.KeyboardButton("EUR/USD"), types.KeyboardButton("GBP/JPY"))
-        kb.add(types.KeyboardButton("GOLD"), types.KeyboardButton("NASDAQ"))
+        # Kept minimal; use inline keyboards for actual asset selection
+        kb = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True)
         kb.add(types.KeyboardButton("🏠 HOME"))
         return kb
 
@@ -1252,9 +850,10 @@ if bot:
             if FREE_SAMPLES.get(uid) == today:
                 utils.send_safe(bot, m.chat.id, "🎟️ Free sample used for today. Upgrade to premium to continue.")
                 return
-            _send_kb_quietly(m.chat.id, build_assets_reply_kb())
-            return
-        _send_kb_quietly(m.chat.id, build_assets_reply_kb())
+        try:
+            bot.send_message(m.chat.id, "Select market:", reply_markup=build_assets_kb())
+        except Exception:
+            pass
 
     @bot.message_handler(commands=["hours"])
     def cmd_hours(m: types.Message):
@@ -1509,9 +1108,10 @@ if bot:
                 if FREE_SAMPLES.get(uid) == today:
                     utils.send_safe(bot, m.chat.id, "🎟️ Free sample used for today. Upgrade to premium to continue.")
                     return
-                _send_kb_quietly(m.chat.id, build_assets_reply_kb())
-                return
-            _send_kb_quietly(m.chat.id, build_assets_reply_kb())
+            try:
+                bot.send_message(m.chat.id, "Select market:", reply_markup=build_assets_kb())
+            except Exception:
+                pass
             return
 
         # Existing shortcuts
@@ -1522,9 +1122,10 @@ if bot:
                 if FREE_SAMPLES.get(uid) == today:
                     utils.send_safe(bot, m.chat.id, "🎟️ Free sample used for today. Upgrade to premium to continue.")
                     return
-                _send_kb_quietly(m.chat.id, build_assets_reply_kb())
-            else:
-                _send_kb_quietly(m.chat.id, build_assets_reply_kb())
+            try:
+                bot.send_message(m.chat.id, "Select market:", reply_markup=build_assets_kb())
+            except Exception:
+                pass
 
         asset_map = {
             "btc/usdt": "BTCUSDT",
@@ -1743,16 +1344,15 @@ if bot:
                 "- Signals and updates are sent right in this chat."
             )
         elif action == "signals":
-            if _user_has_premium(user):
-                _send_kb_quietly(call.message.chat.id, build_assets_reply_kb())
+            today = datetime.now(timezone.utc).date().isoformat()
+            if _user_has_premium(user) or FREE_SAMPLES.get(uid) != today:
+                try:
+                    bot.send_message(call.message.chat.id, "Select market:", reply_markup=build_assets_kb())
+                except Exception:
+                    pass
                 text = None
             else:
-                today = datetime.now(timezone.utc).date().isoformat()
-                if FREE_SAMPLES.get(uid) != today:
-                    _send_kb_quietly(call.message.chat.id, build_assets_reply_kb())
-                    text = None
-                else:
-                    text = "📈 Live signals are for premium users. Check PLAN STATUS for your subscription."
+                text = "📈 Live signals are for premium users. Check PLAN STATUS for your subscription."
         elif action == "tools":
             text = "📊 Analysis tools coming soon."
         elif action == "hours":
@@ -1828,9 +1428,21 @@ if bot:
             pass
         if action == "assets":
             try:
-                bot.send_message(call.message.chat.id, "Select an asset:", reply_markup=build_assets_kb())
+                bot.send_message(call.message.chat.id, "Select market:", reply_markup=build_assets_kb())
             except Exception:
                 pass
+
+    @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("assets:"))
+    def on_assets_category(call: types.CallbackQuery):
+        cat = call.data.split(":", 1)[1]
+        try:
+            bot.answer_callback_query(call.id)
+        except Exception:
+            pass
+        try:
+            bot.send_message(call.message.chat.id, "Select an asset:", reply_markup=build_assets_list_kb(cat))
+        except Exception:
+            pass
 
     @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("sig:"))
     def on_signal_asset(call: types.CallbackQuery):
@@ -1868,15 +1480,8 @@ if bot:
                     pass
                 return
         _, asset_code, tf = call.data.split(":", 2)
-        code_to_pair = {
-            "BTCUSDT": "BTC/USDT",
-            "ETHUSDT": "ETH/USDT",
-            "EURUSD": "EUR/USD",
-            "GBPJPY": "GBP/JPY",
-            "GOLD": "GOLD",
-            "NASDAQ": "NASDAQ",
-        }
-        pair = code_to_pair.get(asset_code, asset_code)
+        code = asset_code[:-4] if asset_code.endswith("_OTC") else asset_code
+        pair = (f"{code[:3]}/{code[3:]}" if len(code) == 6 else code)
         if _user_has_premium(user):
             quota = db.consume_signal_by_telegram_id(uid)
             if not quota.get("ok"):

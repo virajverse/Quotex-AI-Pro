@@ -1,30 +1,22 @@
 {% extends "base.html" %}
 {% block content %}
-<h2>Dashboard</h2>
-<div class="row">
-  <div class="col">
-    <div class="card">
-      <div class="muted">Total Users</div>
-      <div style="font-size:28px; font-weight:700">{{ stats.total_users }}</div>
-    </div>
+<h2 class="section-title">Dashboard</h2>
+<div class="metric-grid">
+  <div class="metric">
+    <div class="label">Total Users</div>
+    <div class="value">{{ stats.total_users }}</div>
   </div>
-  <div class="col">
-    <div class="card">
-      <div class="muted">Active Premium</div>
-      <div style="font-size:28px; font-weight:700">{{ stats.active_premium }}</div>
-    </div>
+  <div class="metric">
+    <div class="label">Active Premium</div>
+    <div class="value">{{ stats.active_premium }}</div>
   </div>
-  <div class="col">
-    <div class="card">
-      <div class="muted">Expiring 1d</div>
-      <div style="font-size:28px; font-weight:700">{{ stats.expiring_1d }}</div>
-    </div>
+  <div class="metric">
+    <div class="label">Expiring 1d</div>
+    <div class="value">{{ stats.expiring_1d }}</div>
   </div>
-  <div class="col">
-    <div class="card">
-      <div class="muted">Expiring 3d</div>
-      <div style="font-size:28px; font-weight:700">{{ stats.expiring_3d }}</div>
-    </div>
+  <div class="metric">
+    <div class="label">Expiring 3d</div>
+    <div class="value">{{ stats.expiring_3d }}</div>
   </div>
 </div>
 
@@ -36,32 +28,6 @@
   </form>
 </div>
 
-<div class="card">
-  <h3>Sync (SQLite ↔ Supabase)</h3>
-  <div class="row">
-    <div class="col">
-      <form action="/admin/sync/push_users" method="post">
-        <button class="btn" type="submit">Push users → Supabase</button>
-      </form>
-    </div>
-    <div class="col">
-      <form action="/admin/sync/pull_users" method="post">
-        <button class="btn" type="submit">Pull users ← Supabase</button>
-      </form>
-    </div>
-    <div class="col">
-      <form action="/admin/sync/push_all" method="post">
-        <button class="btn ok" type="submit">Push ALL tables → Supabase</button>
-      </form>
-    </div>
-    <div class="col">
-      <form action="/admin/sync/pull_all" method="post">
-        <button class="btn warn" type="submit">Pull ALL tables ← Supabase</button>
-      </form>
-    </div>
-  </div>
-  <div class="muted" style="margin-top:8px">Requires DATABASE_URL configured for Supabase. Push copies local SQLite users to Supabase. Pull copies Supabase users into local SQLite.</div>
-</div>
 
 <div class="card">
   <h3>SQLite DB (Download / Upload)</h3>

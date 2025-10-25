@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<h2 class="section-title">Performance (Last 24h)</h2>
+<div class="card">
+  <pre style="white-space:pre-wrap;word-break:break-word;">{{ report }}</pre>
+</div>
+<div class="row">
+  <div class="col">
+    <a class="btn" href="/admin/">⬅️ Back to Dashboard</a>
+  </div>
+</div>
+{% endblock %}

@@ -438,8 +438,20 @@ def admin_products_update():
 def admin_cron():
     result = utils.run_cron(db, bot)
     db.log_admin("cron", result, performed_by="panel")
-    flash(f"Cron run: notices={result.get('notices')} expired={result.get('expired')}", "success")
+    flash(
+        f"Cron run: notices={result.get('notices')} expired={result.get('expired')} evaluated={result.get('evaluated')}",
+        "success",
+    )
     return redirect(url_for("admin_dashboard"))
+
+@app.get("/admin/performance")
+@ui_login_required
+def admin_performance():
+    try:
+        report = utils.generate_24h_served_report(db)
+    except Exception:
+        report = "No data or evaluation failed."
+    return render_template("admin/performance.html", report=report)
 
 @app.get("/admin/db/download")
 @ui_login_required
@@ -641,10 +653,22 @@ if bot:
         kb.add(types.KeyboardButton("📈 LIVE SIGNALS"), types.KeyboardButton("📊 ANALYSIS TOOLS"))
         kb.add(types.KeyboardButton("🔥 24H VIP PROFIT"))
         kb.add(types.KeyboardButton("🕒 MARKET HOURS"), types.KeyboardButton("📅 PLAN STATUS"))
-        kb.add(types.KeyboardButton("💳 BUY PREMIUM"))
+        kb.add(types.KeyboardButton("SELECT A PLAN"))
         kb.add(types.KeyboardButton("🧾 UPLOAD RECEIPT"))
         kb.add(types.KeyboardButton("💬 SUPPORT"))
         kb.add(types.KeyboardButton("⚠️ RISK DISCLAIMER"))
+        return kb
+
+    def build_products_reply_kb():
+        kb = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True)
+        try:
+            items = db.list_products(active_only=True)
+        except Exception:
+            items = []
+        for p in items or []:
+            label = f"{p.get('name')} — {p.get('days')}d"
+            kb.add(types.KeyboardButton(label))
+        kb.add(types.KeyboardButton("⬅️ BACK"), types.KeyboardButton("🏠 HOME"))
         return kb
 
     SIGNAL_LAST: dict[int, str] = {}
@@ -904,15 +928,9 @@ if bot:
             except Exception:
                 pass
             return
-        # Build plans list
-        lines = ["Select a plan:"]
-        for p in items:
-            price_bits = []
-            if p.get('price_inr') is not None: price_bits.append(f"₹{int(p['price_inr'])}")
-            if p.get('price_usdt') is not None: price_bits.append(f"${p['price_usdt']} USDT")
-            lines.append(f"• {p.get('name')} — {p.get('days')}d ({', '.join(price_bits)})")
+        # Show plans as a reply keyboard only (no visible message text)
         try:
-            bot.send_message(m.chat.id, "\n".join(lines), reply_markup=build_products_kb())
+            _send_kb_quietly(m.chat.id, build_products_reply_kb())
         except Exception:
             pass
 
@@ -971,6 +989,7 @@ if bot:
         except Exception:
             pass
         txt = (m.text or "").strip().lower()
+        raw_text = (m.text or "").strip()
         user = db.get_user_by_telegram_id(m.from_user.id)
         # Reply keyboard actions
         if "sign up" in txt or "signup" in txt or "login" in txt:
@@ -990,6 +1009,59 @@ if bot:
             )
             try:
                 bot.send_message(m.chat.id, text, reply_markup=build_main_reply_kb(user))
+            except Exception:
+                pass
+            return
+        # Back/Home from reply keyboards
+        if "back" in txt or "home" in txt:
+            try:
+                bot.send_message(m.chat.id, "Choose an option:", reply_markup=build_main_reply_kb(user))
+            except Exception:
+                pass
+            return
+        # Handle selecting a specific plan from reply keyboard
+        try:
+            items = db.list_products(active_only=True)
+        except Exception:
+            items = []
+        chosen = None
+        for p in items or []:
+            if raw_text == f"{p.get('name')} — {p.get('days')}d" or raw_text == f"{p.get('name')} - {p.get('days')}d":
+                chosen = p
+                break
+        if chosen:
+            try:
+                user = user or db.get_user_by_telegram_id(m.from_user.id) or (
+                    db.upsert_user(m.from_user.id, m.from_user.username or "", m.from_user.first_name or "", m.from_user.last_name or "", m.from_user.language_code or None) or
+                    db.get_user_by_telegram_id(m.from_user.id)
+                )
+            except Exception:
+                pass
+            try:
+                if user:
+                    db.create_order(user_id=user['id'], product_id=chosen.get('id'), method=None, amount=None, currency=None, status='pending')
+            except Exception:
+                pass
+            upi = os.getenv("UPI_ID")
+            tron = os.getenv("USDT_TRC20_ADDRESS") or os.getenv("TRON_ADDRESS")
+            evm = os.getenv("EVM_ADDRESS")
+            price_bits = []
+            if chosen.get('price_inr') is not None: price_bits.append(f"₹{int(chosen['price_inr'])}")
+            if chosen.get('price_usdt') is not None: price_bits.append(f"${chosen['price_usdt']} USDT")
+            lines = [
+                f"Plan: <b>{utils.escape_html(chosen.get('name'))}</b> — {chosen.get('days')} days",
+                f"Price: {', '.join(price_bits) or 'N/A'}",
+                "",
+                "Pay to any of these (then Verify):",
+                f"• UPI: <code>{utils.escape_html(upi)}</code>" if upi else None,
+                f"• USDT TRC20: <code>{utils.escape_html(tron)}</code>" if tron else None,
+                f"• USDT (EVM): <code>{utils.escape_html(evm)}</code>" if evm else None,
+                "",
+                "After paying, tap Verify and send the ID/hash or upload receipt (🧾).",
+            ]
+            text = "\n".join([x for x in lines if x])
+            try:
+                bot.send_message(m.chat.id, text, reply_markup=build_payment_kb())
             except Exception:
                 pass
             return
@@ -1021,8 +1093,8 @@ if bot:
             except Exception:
                 pass
             return
-        if "buy premium" in txt or "payment" in txt or txt == "premium" or "renew" in txt:
-            # Show plans via inline keyboard
+        if "buy premium" in txt or "payment" in txt or txt == "premium" or "renew" in txt or "select a plan" in txt:
+            # Show plans as reply keyboard only (no visible message text)
             try:
                 items = db.list_products(active_only=True)
             except Exception:
@@ -1030,14 +1102,8 @@ if bot:
             if not items:
                 cmd_premium(m)
                 return
-            lines = ["Select a plan:"]
-            for p in items:
-                price_bits = []
-                if p.get('price_inr') is not None: price_bits.append(f"₹{int(p['price_inr'])}")
-                if p.get('price_usdt') is not None: price_bits.append(f"${p['price_usdt']} USDT")
-                lines.append(f"• {p.get('name')} — {p.get('days')}d ({', '.join(price_bits)})")
             try:
-                bot.send_message(m.chat.id, "\n".join(lines), reply_markup=build_products_kb())
+                _send_kb_quietly(m.chat.id, build_products_reply_kb())
             except Exception:
                 pass
             return

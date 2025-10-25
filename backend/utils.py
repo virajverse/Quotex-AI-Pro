@@ -124,7 +124,50 @@ def run_cron(db, bot) -> Dict[str, Any]:
             notices += 1
 
     expired = db.expire_past_due()
-    return {"notices": notices, "expired": expired}
+    evaluated = evaluate_pending_signals(db)
+    return {"notices": notices, "expired": expired, "evaluated": evaluated}
+
+
+def evaluate_pending_signals(db, max_batch: int = 200) -> int:
+    """Evaluate served signal logs missing outcome/pnl."""
+    try:
+        rows = db.list_signal_logs_pending(limit=max_batch)
+    except Exception:
+        return 0
+    if not rows:
+        return 0
+    evaluated = 0
+    for r in rows:
+        pair = r.get("pair")
+        tf = r.get("timeframe") or "5m"
+        entry_time = r.get("entry_time") or r.get("created_at")
+        direction = (r.get("direction") or "").upper()
+        if not pair or not entry_time or direction not in ("UP", "DOWN"):
+            continue
+        cls = _classify_asset(pair)
+        ev = None
+        try:
+            if cls == "crypto":
+                ev = _eval_option_a_crypto(pair, tf, entry_time, direction)
+            else:
+                if os.getenv("FINNHUB_API_KEY", "").strip():
+                    ev = _eval_option_a_finnhub(pair, tf, entry_time, direction)
+        except Exception:
+            ev = None
+        if not ev or ev.get("exit_price") is None:
+            continue
+        try:
+            db.update_signal_evaluation(
+                r.get("id"),
+                ev.get("exit_price"),
+                ev.get("exit_time"),
+                ev.get("pnl_pct"),
+                ev.get("outcome"),
+            )
+            evaluated += 1
+        except Exception:
+            continue
+    return evaluated
 
 
 def generate_signal() -> str:
@@ -1000,6 +1043,17 @@ def _force_signal_from_tf(pair: str) -> Optional[Dict[str, Any]]:
                 d = "DOWN"
             else:
                 d = "UP" if bool(live.get("ema_fast_over_slow", False)) else "DOWN"
+        # Enforce ADX/ATR gates on fallback to avoid weak setups
+        metrics = s.get("m", {})
+        adx = metrics.get("adx")
+        atrp = metrics.get("atrp")
+        min_adx = float(os.getenv("ENSEMBLE_MIN_ADX", "18"))
+        atr_min = float(os.getenv("ENSEMBLE_MIN_ATR_PCT", "0.02"))
+        atr_max = float(os.getenv("ENSEMBLE_MAX_ATR_PCT", "2.5"))
+        if adx is None or adx < min_adx:
+            continue
+        if atrp is None or not (atr_min <= atrp <= atr_max):
+            continue
         reasons = s.get("reasons_up", []) if d == "UP" else s.get("reasons_down", [])
         conf = max(2, min(4, 2 + int(abs(float(s.get("score", 0))))))
         return {"dir": d, "confidence": conf, "reasons": list(dict.fromkeys(reasons))[:3]}
@@ -1563,8 +1617,6 @@ def generate_24h_performance_report(pairs: Optional[List[str]] = None, timeframe
         ])
         if winners:
             lines.append("✅ Winners: " + ", ".join(winners))
-        if losers:
-            lines.append("❌ Losers: " + ", ".join(losers))
     else:
-        lines.append("Data not available. Configure API or try again later.")
+        lines.append("No trades generated. Check Finnhub access and pair list.")
     return "\n".join(lines)

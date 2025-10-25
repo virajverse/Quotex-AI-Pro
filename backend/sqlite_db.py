@@ -888,6 +888,17 @@ def list_signal_logs_since(hours: int = 24, pairs: Optional[List[str]] = None) -
         cursor.execute(base, tuple(params))
         return [dict(r) for r in cursor.fetchall()]
 
+def list_signal_logs_pending(limit: int = 200) -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT * FROM signal_logs
+        WHERE outcome IS NULL OR outcome = ''
+        ORDER BY id ASC
+        LIMIT ?
+        ''', (limit,))
+        return [dict(r) for r in cursor.fetchall()]
+
 def list_signal_logs_by_user(user_id: int, limit: int = 1000) -> List[Dict[str, Any]]:
     with get_conn() as conn:
         cursor = conn.cursor()

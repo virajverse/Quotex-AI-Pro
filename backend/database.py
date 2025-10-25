@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 if DATABASE_URL and "sslmode=" not in DATABASE_URL:
     DATABASE_URL += ("&" if "?" in DATABASE_URL else "?") + "sslmode=require"
+if DATABASE_URL and "connect_timeout=" not in DATABASE_URL:
+    DATABASE_URL += ("&" if "?" in DATABASE_URL else "?") + f"connect_timeout={int(os.getenv('DB_CONNECT_TIMEOUT','5'))}"
 if not DATABASE_URL:
     logger.warning("DATABASE_URL not set")
 
@@ -25,6 +27,18 @@ if DATABASE_URL:
         min_size=1,
         max_size=int(os.getenv("DB_POOL_MAX", "8")),
     )
+
+def ping() -> bool:
+    """Return True if we can open a short connection and run SELECT 1."""
+    if not pool:
+        return False
+    try:
+        with pool.connection() as c, c.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        return True
+    except Exception:
+        return False
 
 @contextmanager
 def get_conn():

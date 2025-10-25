@@ -4,8 +4,12 @@ import threading
 from datetime import datetime, timezone, timedelta
 from functools import wraps
 
-from flask import Flask, request, jsonify, render_template, redirect, url_for, session, flash
+from flask import Flask, request, jsonify, render_template, redirect, url_for, session, flash, send_file
 from flask_cors import CORS
+from werkzeug.utils import secure_filename
+import shutil
+import io
+import tempfile
 
 import telebot
 from telebot import types
@@ -36,7 +40,15 @@ except Exception:
     pdb = None
 try:
     if os.getenv("DATABASE_URL", "").strip():
-        from . import database as db
+        from . import database as pgdb
+        # If Postgres is reachable, use it; otherwise fallback to SQLite for primary db
+        use_pg = False
+        try:
+            if hasattr(pgdb, "ping") and pgdb.ping():
+                use_pg = True
+        except Exception:
+            use_pg = False
+        db = pgdb if use_pg else sdb
     else:
         from . import sqlite_db as db
 except Exception:
@@ -62,7 +74,11 @@ FREE_SAMPLES: dict[int, str] = {}
 # ---- Sync readiness helpers ----
 def _pdb_ready() -> bool:
     try:
-        return bool(pdb) and bool(getattr(pdb, "pool", None))
+        if not pdb:
+            return False
+        if hasattr(pdb, "ping"):
+            return bool(pdb.ping())
+        return bool(getattr(pdb, "pool", None))
     except Exception:
         return False
 
@@ -828,6 +844,66 @@ def admin_sync_push_all():
         logger.exception("push_all failed")
     db.log_admin("sync_push_all", counts, performed_by="panel")
     flash(f"Push complete: {counts}", "success")
+    return redirect(url_for("admin_dashboard"))
+
+@app.get("/admin/db/download")
+@ui_login_required
+def admin_db_download():
+    try:
+        if not _sdb_ready():
+            flash("Local SQLite not available.", "danger")
+            return redirect(url_for("admin_dashboard"))
+        path = getattr(sdb, "DB_PATH", None)
+        if not path or not os.path.exists(path):
+            return send_file(io.BytesIO(b""), as_attachment=True, download_name="bot.db")
+        return send_file(path, as_attachment=True, download_name=os.path.basename(path))
+    except Exception:
+        logger.exception("db download failed")
+        flash("Download failed", "danger")
+        return redirect(url_for("admin_dashboard"))
+
+@app.post("/admin/db/upload")
+@ui_login_required
+def admin_db_upload():
+    try:
+        if not _sdb_ready():
+            flash("Local SQLite not available.", "danger")
+            return redirect(url_for("admin_dashboard"))
+        f = request.files.get("file")
+        if not f or not f.filename:
+            flash("Choose a file", "warning")
+            return redirect(url_for("admin_dashboard"))
+        fn = secure_filename(f.filename)
+        dst = getattr(sdb, "DB_PATH", None)
+        if not dst:
+            flash("SQLite path unavailable", "danger")
+            return redirect(url_for("admin_dashboard"))
+        tmp = os.path.join(os.path.dirname(dst), fn + ".upload")
+        f.save(tmp)
+        ok = False
+        try:
+            with open(tmp, "rb") as fh:
+                sig = fh.read(16)
+                ok = sig.startswith(b"SQLite format 3")
+        except Exception:
+            ok = False
+        if not ok:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+            flash("Invalid SQLite file", "danger")
+            return redirect(url_for("admin_dashboard"))
+        try:
+            if os.path.exists(dst):
+                shutil.copy2(dst, dst + ".bak")
+        except Exception:
+            pass
+        shutil.move(tmp, dst)
+        flash("Database replaced", "success")
+    except Exception:
+        logger.exception("db upload failed")
+        flash("Upload failed", "danger")
     return redirect(url_for("admin_dashboard"))
 
 @app.route("/health", methods=["GET", "HEAD"])

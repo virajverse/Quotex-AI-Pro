@@ -62,4 +62,20 @@
   </div>
   <div class="muted" style="margin-top:8px">Requires DATABASE_URL configured for Supabase. Push copies local SQLite users to Supabase. Pull copies Supabase users into local SQLite.</div>
 </div>
+
+<div class="card">
+  <h3>SQLite DB (Download / Upload)</h3>
+  <div class="row">
+    <div class="col">
+      <a class="btn" href="/admin/db/download">Download bot.db</a>
+    </div>
+    <div class="col">
+      <form action="/admin/db/upload" method="post" enctype="multipart/form-data">
+        <input type="file" name="file" accept=".db,.sqlite" required>
+        <button class="btn warn" type="submit">Upload & Replace</button>
+      </form>
+    </div>
+  </div>
+  <div class="muted" style="margin-top:8px">Upload replaces local bot.db (backup .bak created).</div>
+</div>
 {% endblock %}

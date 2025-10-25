@@ -1,12 +1,13 @@
 import os
 import logging
+import json
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-import psycopg2
-import psycopg2.pool
-import psycopg2.extras
+import psycopg
+from psycopg_pool import ConnectionPool
+from psycopg.rows import dict_row
 
 logger = logging.getLogger(__name__)
 
@@ -16,28 +17,35 @@ if DATABASE_URL and "sslmode=" not in DATABASE_URL:
 if not DATABASE_URL:
     logger.warning("DATABASE_URL not set")
 
-pool: Optional[psycopg2.pool.SimpleConnectionPool] = None
+pool: Optional[ConnectionPool] = None
 if DATABASE_URL:
-    pool = psycopg2.pool.SimpleConnectionPool(
-        minconn=1,
-        maxconn=int(os.getenv("DB_POOL_MAX", "8")),
-        dsn=DATABASE_URL,
-        cursor_factory=psycopg2.extras.RealDictCursor,
+    # Connection pool for psycopg3
+    pool = ConnectionPool(
+        DATABASE_URL,
+        min_size=1,
+        max_size=int(os.getenv("DB_POOL_MAX", "8")),
     )
 
 @contextmanager
 def get_conn():
     if not pool:
         raise RuntimeError("Database pool not initialized")
-    conn = pool.getconn()
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        pool.putconn(conn)
+    # psycopg3 pool provides a context manager yielding a connection
+    with pool.connection() as conn:
+        # Ensure dict rows everywhere by default
+        try:
+            conn.row_factory = dict_row
+        except Exception:
+            pass
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
 
 def to_iso(dt: Optional[datetime]) -> Optional[str]:
     if dt is None: return None
@@ -281,16 +289,32 @@ def list_orders(status: Optional[str] = None, limit: int = 100) -> List[Dict[str
 
 def insert_verification(user_id: int, method: str, status: str, tx_id: Optional[str], tx_hash: Optional[str], amount, currency, request_data=None, notes: Optional[str]=None) -> int:
     with get_conn() as c, c.cursor() as cur:
-        cur.execute("""
+        cur.execute(
+            """
         INSERT INTO verifications (user_id, method, status, tx_id, tx_hash, amount, currency, request_data, notes)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        VALUES (%s,%s,%s,%s,%s,%s,%s, CAST(%s AS JSONB), %s)
         RETURNING id
-        """, (user_id, method, status, tx_id, tx_hash, amount, currency, psycopg2.extras.Json(request_data or {}), notes))
+        """,
+            (
+                user_id,
+                method,
+                status,
+                tx_id,
+                tx_hash,
+                amount,
+                currency,
+                json.dumps(request_data or {}),
+                notes,
+            ),
+        )
         return int(cur.fetchone()["id"])
 
 def log_admin(action: str, detail: Dict[str, Any], performed_by: str = "system", ip: Optional[str] = None):
     with get_conn() as c, c.cursor() as cur:
-        cur.execute("INSERT INTO admin_logs (action, performed_by, ip, detail) VALUES (%s,%s,%s,%s)", (action, performed_by, ip, psycopg2.extras.Json(detail or {})))
+        cur.execute(
+            "INSERT INTO admin_logs (action, performed_by, ip, detail) VALUES (%s,%s,%s, CAST(%s AS JSONB))",
+            (action, performed_by, ip, json.dumps(detail or {})),
+        )
 
 def get_users_expiring_in_days(days: int) -> List[Dict[str, Any]]:
     field = "reminded_d1_at" if days == 1 else "reminded_d3_at" if days == 3 else None

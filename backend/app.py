@@ -527,6 +527,31 @@ def admin_sync_push_users():
     db.log_admin("sync_push_users", {"pushed": pushed}, performed_by="panel")
     return redirect(url_for("admin_dashboard"))
 
+@app.post("/admin/sync/pull_users")
+@ui_login_required
+def admin_sync_pull_users():
+    if not pdb:
+        flash("Supabase DATABASE_URL not configured.", "danger")
+        return redirect(url_for("admin_dashboard"))
+    if not sdb:
+        flash("Local SQLite not available.", "danger")
+        return redirect(url_for("admin_dashboard"))
+    rows = []
+    try:
+        rows = pdb.list_all_users_full()
+    except Exception:
+        rows = []
+    pulled = 0
+    for r in rows:
+        try:
+            sdb.upsert_user_full(r)
+            pulled += 1
+        except Exception:
+            pass
+    db.log_admin("sync_pull_users", {"pulled": pulled}, performed_by="panel")
+    flash(f"Pulled {pulled} users from Supabase", "success")
+    return redirect(url_for("admin_dashboard"))
+
 @app.post("/admin/sync/pull_all")
 @ui_login_required
 def admin_sync_pull_all():
@@ -790,6 +815,11 @@ def admin_sync_push_all():
     db.log_admin("sync_push_all", counts, performed_by="panel")
     flash(f"Push complete: {counts}", "success")
     return redirect(url_for("admin_dashboard"))
+
+@app.route("/health", methods=["GET", "HEAD"])
+@app.route("/health/", methods=["GET", "HEAD"])
+def health():
+    return jsonify({"ok": True})
 
 @app.get("/health/db")
 def health_db():

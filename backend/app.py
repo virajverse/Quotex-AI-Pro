@@ -704,6 +704,12 @@ if bot:
         )
         return kb
 
+    def build_payment_reply_kb():
+        kb = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+        kb.add(types.KeyboardButton("✅ Verify UPI"), types.KeyboardButton("✅ Verify USDT"))
+        kb.add(types.KeyboardButton("🏠 Main Menu"), types.KeyboardButton("👤 Profile"))
+        return kb
+
     def build_products_kb():
         kb = types.InlineKeyboardMarkup(row_width=1)
         try:
@@ -773,7 +779,7 @@ if bot:
         except Exception:
             pass
         try:
-            bot.send_message(call.message.chat.id, text, reply_markup=build_payment_kb())
+            bot.send_message(call.message.chat.id, text, reply_markup=build_payment_reply_kb())
         except Exception:
             pass
 
@@ -924,7 +930,7 @@ if bot:
                 f"- USDT (EVM: ETH/BSC/Polygon): <code>{utils.escape_html(evm)}</code>" if evm else "- USDT (EVM): not configured",
             ]
             try:
-                bot.send_message(m.chat.id, "\n".join(lines), reply_markup=build_payment_kb())
+                bot.send_message(m.chat.id, "\n".join(lines), reply_markup=build_payment_reply_kb())
             except Exception:
                 pass
             return
@@ -1019,6 +1025,42 @@ if bot:
             except Exception:
                 pass
             return
+        # Main Menu button
+        if "main menu" in txt:
+            try:
+                bot.send_message(m.chat.id, "Choose an option:", reply_markup=build_main_reply_kb(user))
+            except Exception:
+                pass
+            return
+        # Verify buttons from reply keyboard
+        if "verify upi" in txt:
+            try:
+                urow = db.get_user_by_telegram_id(m.from_user.id)
+                if urow and hasattr(db, 'get_latest_pending_order_by_user_and_method'):
+                    order = db.get_latest_pending_order_by_user_and_method(urow['id'], None)
+                    if order:
+                        db.update_order_method(order['id'], 'upi')
+            except Exception:
+                pass
+            try:
+                bot.send_message(m.chat.id, "Send your UPI transaction id using:\n/verify_upi TXN_ID", reply_markup=build_payment_reply_kb())
+            except Exception:
+                pass
+            return
+        if "verify usdt" in txt:
+            try:
+                urow = db.get_user_by_telegram_id(m.from_user.id)
+                if urow and hasattr(db, 'get_latest_pending_order_by_user_and_method'):
+                    order = db.get_latest_pending_order_by_user_and_method(urow['id'], None)
+                    if order:
+                        db.update_order_method(order['id'], 'usdt')
+            except Exception:
+                pass
+            try:
+                bot.send_message(m.chat.id, "Send your USDT tx hash using:\n/verify_usdt TX_HASH", reply_markup=build_payment_reply_kb())
+            except Exception:
+                pass
+            return
         # Handle selecting a specific plan from reply keyboard
         try:
             items = db.list_products(active_only=True)
@@ -1061,7 +1103,7 @@ if bot:
             ]
             text = "\n".join([x for x in lines if x])
             try:
-                bot.send_message(m.chat.id, text, reply_markup=build_payment_kb())
+                bot.send_message(m.chat.id, text, reply_markup=build_payment_reply_kb())
             except Exception:
                 pass
             return

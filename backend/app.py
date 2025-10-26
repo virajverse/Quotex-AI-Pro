@@ -2,7 +2,6 @@ import os
 import logging
 import threading
 import mimetypes
-import imghdr
 from datetime import datetime, timezone, timedelta
 from functools import wraps
 
@@ -329,26 +328,18 @@ def admin_verification_receipt(vid: int):
             try:
                 if head.startswith(b'%PDF'):
                     mime = 'application/pdf'
-                else:
-                    img_kind = imghdr.what(None, h=data)
-                    if img_kind:
-                        mapping = {
-                            'jpeg': 'image/jpeg',
-                            'png': 'image/png',
-                            'gif': 'image/gif',
-                            'tiff': 'image/tiff',
-                            'bmp': 'image/bmp',
-                            'rgb': 'image/x-rgb',
-                            'pbm': 'image/x-portable-bitmap',
-                            'pgm': 'image/x-portable-graymap',
-                            'ppm': 'image/x-portable-pixmap',
-                            'rast': 'image/cmu-raster',
-                            'xbm': 'image/x-xbitmap',
-                        }
-                        mime = mapping.get(img_kind, mime)
-                    # crude WEBP check
-                    elif head[:4] == b'RIFF' and (data[8:12] if len(data) >= 12 else b'') == b'WEBP':
-                        mime = 'image/webp'
+                elif head[:3] == b'\xff\xd8\xff':
+                    mime = 'image/jpeg'
+                elif head.startswith(b'\x89PNG\r\n\x1a\n'):
+                    mime = 'image/png'
+                elif head.startswith(b'GIF87a') or head.startswith(b'GIF89a'):
+                    mime = 'image/gif'
+                elif head.startswith(b'BM'):
+                    mime = 'image/bmp'
+                elif head.startswith(b'II*\x00') or head.startswith(b'MM\x00*'):
+                    mime = 'image/tiff'
+                elif head[:4] == b'RIFF' and (data[8:12] if len(data) >= 12 else b'') == b'WEBP':
+                    mime = 'image/webp'
             except Exception:
                 pass
         resp = send_file(io.BytesIO(data), mimetype=mime)

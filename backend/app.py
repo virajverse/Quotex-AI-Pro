@@ -862,7 +862,7 @@ if bot:
         img_url = (os.getenv("UPI_QR_IMAGE_URL") or "").strip()
         if fid:
             try:
-                bot.send_photo(chat_id, fid, caption=caption, reply_markup=build_upi_open_kb(upi_url) if upi_url else None)
+                bot.send_photo(chat_id, fid, caption=caption)
                 return
             except Exception:
                 pass
@@ -874,16 +874,16 @@ if bot:
                 qr_from_upi = None
         try:
             if img_url:
-                bot.send_photo(chat_id, img_url, caption=caption, reply_markup=build_upi_open_kb(upi_url) if upi_url else None)
+                bot.send_photo(chat_id, img_url, caption=caption)
                 return
             if qr_from_upi:
-                bot.send_photo(chat_id, qr_from_upi, caption=caption, reply_markup=build_upi_open_kb(upi_url))
+                bot.send_photo(chat_id, qr_from_upi, caption=caption)
                 return
         except Exception:
             pass
         # Fallback text
         try:
-            text = "Scan & Pay via UPI. " + (f"Open link: {upi_url}" if upi_url else "UPI ID not configured.")
+            text = "Scan & Pay via UPI."
             bot.send_message(chat_id, text, reply_markup=build_payment_reply_kb())
         except Exception:
             pass

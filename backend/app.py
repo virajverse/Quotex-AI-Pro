@@ -701,75 +701,82 @@ if bot:
         return "\n".join(lines)
 
     def send_pricing_card(chat_id: int):
+        stop_loading = start_chat_action(chat_id, "typing")
         try:
-            items = db.list_products(active_only=True)
-        except Exception:
-            items = []
-        if not items:
             try:
-                bot.send_message(chat_id, "Pricing unavailable right now.")
+                items = db.list_products(active_only=True)
             except Exception:
-                pass
-            return
-        img = None
-        try:
-            from PIL import Image, ImageDraw, ImageFont, ImageFilter
-            w, h = 1000, 120 + 180 * max(1, len(items))
-            bg = Image.new("RGB", (w, h), (10, 12, 22))
-            draw = ImageDraw.Draw(bg, "RGBA")
-            for i in range(0, h, 4):
-                c = 12 + int(8 * (i / h))
-                draw.line([(0, i), (w, i)], fill=(c, c, c + 6, 255))
-            accent = (0, 188, 255)
-            title = "Pricing"
-            try:
-                fp = os.getenv("FONT_PATH")
-                font_title = ImageFont.truetype(fp, 60) if fp else ImageFont.load_default()
-                font_sub = ImageFont.truetype(fp, 30) if fp else ImageFont.load_default()
-                font_card = ImageFont.truetype(fp, 36) if fp else ImageFont.load_default()
-                font_small = ImageFont.truetype(fp, 28) if fp else ImageFont.load_default()
-            except Exception:
-                font_title = ImageFont.load_default(); font_sub = ImageFont.load_default(); font_card = ImageFont.load_default(); font_small = ImageFont.load_default()
-            draw.rectangle([30, 30, w - 30, 110], outline=(30, 34, 56), width=2)
-            draw.text((50, 50), title, fill=(240, 240, 255), font=font_title)
-            draw.text((50, 100), "Select a plan below", fill=(160, 170, 190), font=font_sub)
-            y = 150
-            for p in items:
-                box_h = 150
-                draw.rectangle([30, y, w - 30, y + box_h], fill=(18, 20, 36), outline=(40, 45, 70), width=2)
-                draw.rectangle([30, y, 36, y + box_h], fill=accent)
-                name = f"{p.get('name')} — {p.get('days')}d"
-                inr = p.get('price_inr')
-                usdt = p.get('price_usdt')
-                price_bits = []
-                if inr is not None:
-                    try:
-                        price_bits.append(f"₹{int(inr) if float(inr).is_integer() else inr}")
-                    except Exception:
-                        price_bits.append(f"₹{inr}")
-                if usdt is not None:
-                    price_bits.append(f"${usdt} USDT")
-                price = ", ".join(price_bits) if price_bits else "N/A"
-                draw.text((60, y + 30), name, fill=(235, 238, 255), font=font_card)
-                draw.text((60, y + 90), price, fill=(0, 200, 180), font=font_small)
-                y += box_h + 20
-            img = bg
-        except Exception:
+                items = []
+            if not items:
+                try:
+                    bot.send_message(chat_id, "Pricing unavailable right now.")
+                except Exception:
+                    pass
+                return
             img = None
-        if img is None:
             try:
-                bot.send_message(chat_id, pricing_message())
+                from PIL import Image, ImageDraw, ImageFont, ImageFilter
+                w, h = 1000, 120 + 180 * max(1, len(items))
+                bg = Image.new("RGB", (w, h), (10, 12, 22))
+                draw = ImageDraw.Draw(bg, "RGBA")
+                for i in range(0, h, 4):
+                    c = 12 + int(8 * (i / h))
+                    draw.line([(0, i), (w, i)], fill=(c, c, c + 6, 255))
+                accent = (0, 188, 255)
+                title = "Pricing"
+                try:
+                    fp = os.getenv("FONT_PATH")
+                    font_title = ImageFont.truetype(fp, 60) if fp else ImageFont.load_default()
+                    font_sub = ImageFont.truetype(fp, 30) if fp else ImageFont.load_default()
+                    font_card = ImageFont.truetype(fp, 36) if fp else ImageFont.load_default()
+                    font_small = ImageFont.truetype(fp, 28) if fp else ImageFont.load_default()
+                except Exception:
+                    font_title = ImageFont.load_default(); font_sub = ImageFont.load_default(); font_card = ImageFont.load_default(); font_small = ImageFont.load_default()
+                draw.rectangle([30, 30, w - 30, 110], outline=(30, 34, 56), width=2)
+                draw.text((50, 50), title, fill=(240, 240, 255), font=font_title)
+                draw.text((50, 100), "Select a plan below", fill=(160, 170, 190), font=font_sub)
+                y = 150
+                for p in items:
+                    box_h = 150
+                    draw.rectangle([30, y, w - 30, y + box_h], fill=(18, 20, 36), outline=(40, 45, 70), width=2)
+                    draw.rectangle([30, y, 36, y + box_h], fill=accent)
+                    name = f"{p.get('name')} — {p.get('days')}d"
+                    inr = p.get('price_inr')
+                    usdt = p.get('price_usdt')
+                    price_bits = []
+                    if inr is not None:
+                        try:
+                            price_bits.append(f"₹{int(inr) if float(inr).is_integer() else inr}")
+                        except Exception:
+                            price_bits.append(f"₹{inr}")
+                    if usdt is not None:
+                        price_bits.append(f"${usdt} USDT")
+                    price = ", ".join(price_bits) if price_bits else "N/A"
+                    draw.text((60, y + 30), name, fill=(235, 238, 255), font=font_card)
+                    draw.text((60, y + 90), price, fill=(0, 200, 180), font=font_small)
+                    y += box_h + 20
+                img = bg
             except Exception:
-                pass
-            return
-        try:
-            bio = io.BytesIO()
-            img.save(bio, format="PNG")
-            bio.seek(0)
-            bot.send_photo(chat_id, photo=bio, caption="Select a plan below.")
-        except Exception:
+                img = None
+            if img is None:
+                try:
+                    bot.send_message(chat_id, pricing_message())
+                except Exception:
+                    pass
+                return
             try:
-                bot.send_message(chat_id, pricing_message())
+                bio = io.BytesIO()
+                img.save(bio, format="PNG")
+                bio.seek(0)
+                bot.send_photo(chat_id, photo=bio, caption="Select a plan below.")
+            except Exception:
+                try:
+                    bot.send_message(chat_id, pricing_message())
+                except Exception:
+                    pass
+        finally:
+            try:
+                stop_loading()
             except Exception:
                 pass
 
@@ -793,6 +800,21 @@ if bot:
             bot.send_message(chat_id, "\u2063", reply_markup=kb)
         except Exception:
             pass
+
+    def start_chat_action(chat_id: int, action: str = "typing", interval: float = 4.0):
+        stop = threading.Event()
+        def run():
+            try:
+                while not stop.is_set():
+                    try:
+                        bot.send_chat_action(chat_id, action)
+                    except Exception:
+                        pass
+                    stop.wait(interval)
+            except Exception:
+                pass
+        threading.Thread(target=run, daemon=True).start()
+        return stop.set
 
     def build_payment_kb():
         kb = types.InlineKeyboardMarkup(row_width=2)
@@ -1543,7 +1565,14 @@ if bot:
                 "NASDAQ": "NASDAQ",
             }
             pair = code_to_pair.get(asset_code, asset_code)
-            text = utils.generate_ensemble_signal(pair, txt)
+            stop_loading_tf = start_chat_action(m.chat.id, "typing")
+            try:
+                text = utils.generate_ensemble_signal(pair, txt)
+            finally:
+                try:
+                    stop_loading_tf()
+                except Exception:
+                    pass
             footer = (
                 f"\nRemaining today: {max(quota.get('daily_limit',0)-quota.get('used_today',0),0)} · "
                 f"Credits: {quota.get('credits',0)} ({'daily' if quota.get('source')=='daily' else ('credit' if quota.get('source')=='credit' else 'free')} used)"
@@ -1888,7 +1917,14 @@ if bot:
             # Mark free sample as used
             FREE_SAMPLES[uid] = datetime.now(timezone.utc).date().isoformat()
             quota = {"ok": True, "source": "free", "used_today": 1, "daily_limit": 1, "credits": 0}
-        text = utils.generate_ensemble_signal(pair, tf)
+        stop_loading_tf = start_chat_action(call.message.chat.id, "typing")
+        try:
+            text = utils.generate_ensemble_signal(pair, tf)
+        finally:
+            try:
+                stop_loading_tf()
+            except Exception:
+                pass
         footer = (
             f"\nRemaining today: {max(quota.get('daily_limit',0)-quota.get('used_today',0),0)} · "
             f"Credits: {quota.get('credits',0)} ({'daily' if quota.get('source')=='daily' else ('credit' if quota.get('source')=='credit' else 'free')} used)"

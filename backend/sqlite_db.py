@@ -4,6 +4,8 @@ import logging
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
+import json
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -411,6 +413,46 @@ def get_verification(verification_id: int) -> Optional[Dict[str, Any]]:
         cursor.execute('SELECT * FROM verifications WHERE id=?', (verification_id,))
         r = cursor.fetchone()
         return dict(r) if r else None
+
+def get_latest_user_receipt_file_id(user_id: int) -> Optional[str]:
+    """Return latest receipt file_id from orders or receipt verifications for the user."""
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        # Prefer order attachment
+        cursor.execute('''
+            SELECT receipt_file_id FROM orders
+            WHERE user_id = ? AND receipt_file_id IS NOT NULL AND receipt_file_id != ''
+            ORDER BY id DESC LIMIT 1
+        ''', (user_id,))
+        r = cursor.fetchone()
+        if r and r['receipt_file_id']:
+            return r['receipt_file_id']
+        # Fallback: latest receipt verification
+        cursor.execute('''
+            SELECT request_data FROM verifications
+            WHERE user_id = ? AND method = 'receipt'
+            ORDER BY id DESC LIMIT 1
+        ''', (user_id,))
+        v = cursor.fetchone()
+        if not v or not v['request_data']:
+            return None
+        raw = v['request_data']
+        # Try JSON first
+        try:
+            data = json.loads(raw)
+            fid = data.get('file_id') if isinstance(data, dict) else None
+            if fid:
+                return fid
+        except Exception:
+            pass
+        # Try to extract from python-dict-like string
+        try:
+            m = re.search(r"file_id['\"]\s*[:=]\s*['\"]([^'\"]+)", raw)
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
+        return None
 
 def set_verification_status(verification_id: int, status: str, notes: Optional[str] = None):
     with get_conn() as conn:

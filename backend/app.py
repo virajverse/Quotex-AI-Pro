@@ -654,7 +654,6 @@ if bot:
         kb.add(types.KeyboardButton("🔥 24H VIP PROFIT"))
         kb.add(types.KeyboardButton("🕒 MARKET HOURS"), types.KeyboardButton("📅 PLAN STATUS"))
         kb.add(types.KeyboardButton("SELECT A PLAN"))
-        kb.add(types.KeyboardButton("🧾 UPLOAD RECEIPT"))
         kb.add(types.KeyboardButton("💬 SUPPORT"))
         kb.add(types.KeyboardButton("⚠️ RISK DISCLAIMER"))
         return kb
@@ -707,6 +706,7 @@ if bot:
     def build_payment_reply_kb():
         kb = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
         kb.add(types.KeyboardButton("✅ Verify UPI"), types.KeyboardButton("✅ Verify USDT"))
+        kb.add(types.KeyboardButton("🧾 Upload Receipt"), types.KeyboardButton("👁️ View Receipt"))
         kb.add(types.KeyboardButton("🏠 Main Menu"), types.KeyboardButton("👤 Profile"))
         return kb
 
@@ -1060,6 +1060,37 @@ if bot:
                 bot.send_message(m.chat.id, "Send your USDT tx hash using:\n/verify_usdt TX_HASH", reply_markup=build_payment_reply_kb())
             except Exception:
                 pass
+            return
+        if "upload receipt" in txt:
+            # Hint user to send photo/document; handlers will capture it
+            try:
+                bot.send_message(m.chat.id, "Please upload your payment receipt as a Photo or Document here. You can add a caption if needed.", reply_markup=build_payment_reply_kb())
+            except Exception:
+                pass
+            return
+        if "view receipt" in txt:
+            try:
+                urow = db.get_user_by_telegram_id(m.from_user.id)
+                fid = db.get_latest_user_receipt_file_id(urow['id']) if urow else None
+            except Exception:
+                fid = None
+            if not fid:
+                try:
+                    bot.send_message(m.chat.id, "No receipt found. Tap 'Upload Receipt' to send one.", reply_markup=build_payment_reply_kb())
+                except Exception:
+                    pass
+                return
+            # Try sending as photo first, fall back to document
+            try:
+                bot.send_photo(m.chat.id, fid, caption="Your latest receipt", reply_markup=build_payment_reply_kb())
+            except Exception:
+                try:
+                    bot.send_document(m.chat.id, fid, caption="Your latest receipt", reply_markup=build_payment_reply_kb())
+                except Exception:
+                    try:
+                        bot.send_message(m.chat.id, "Receipt found but could not display.")
+                    except Exception:
+                        pass
             return
         # Handle selecting a specific plan from reply keyboard
         try:
@@ -1523,7 +1554,7 @@ if bot:
         except Exception:
             pass
         try:
-            bot.send_message(call.message.chat.id, txt, reply_markup=build_basic_nav_kb())
+            bot.send_message(call.message.chat.id, txt, reply_markup=build_payment_reply_kb())
         except Exception:
             pass
 

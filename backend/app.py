@@ -856,6 +856,7 @@ if bot:
                 pass
 
     SIGNAL_LAST: dict[int, str] = {}
+    ASSETS_STATE: dict[int, dict] = {}
 
     def build_assets_reply_kb():
         # Kept minimal; use inline keyboards for actual asset selection
@@ -915,6 +916,43 @@ if bot:
         kb.add(types.KeyboardButton("OTC FX"), types.KeyboardButton("LIVE FX"))
         kb.add(types.KeyboardButton("🏠 Main Menu"), types.KeyboardButton("👤 Profile"))
         return kb
+
+    def build_assets_reply_page_kb(category: str, page: int = 0, page_size: int = 10):
+        pairs = PAIRS_BASE[:]
+        start = max(page, 0) * page_size
+        end = start + page_size
+        page_pairs = pairs[start:end]
+        kb = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+        # Title row via message, buttons are only pairs
+        for i in range(0, len(page_pairs), 2):
+            row = page_pairs[i:i+2]
+            if len(row) == 2:
+                kb.add(types.KeyboardButton(row[0]), types.KeyboardButton(row[1]))
+            else:
+                kb.add(types.KeyboardButton(row[0]))
+        nav_left = "◀ Prev" if start > 0 else None
+        nav_right = "Next ▶" if end < len(pairs) else None
+        nav_row = []
+        if nav_left:
+            nav_row.append(types.KeyboardButton(nav_left))
+        if nav_right:
+            nav_row.append(types.KeyboardButton(nav_right))
+        if nav_row:
+            kb.add(*nav_row)
+        kb.add(types.KeyboardButton("⬅️ Categories"))
+        kb.add(types.KeyboardButton("🏠 Main Menu"), types.KeyboardButton("👤 Profile"))
+        return kb
+
+    def _show_assets_reply(chat_id: int, category: str, page: int = 0):
+        try:
+            _send_kb_quietly(chat_id, build_assets_reply_page_kb(category, page))
+        except Exception:
+            pass
+        title = "Select OTC asset:" if category == "otc" else "Select LIVE asset:"
+        try:
+            bot.send_message(chat_id, title)
+        except Exception:
+            pass
 
     def build_upi_open_kb(upi_url: str):
         try:
@@ -1195,7 +1233,11 @@ if bot:
                 utils.send_safe(bot, m.chat.id, "🎟️ Free sample used for today. Upgrade to premium to continue.")
                 return
         try:
-            bot.send_message(m.chat.id, "Select market:", reply_markup=build_assets_kb())
+            _send_kb_quietly(m.chat.id, build_quick_assets_reply_kb())
+        except Exception:
+            pass
+        try:
+            bot.send_message(m.chat.id, "Choose category:")
         except Exception:
             pass
 
@@ -1590,24 +1632,43 @@ if bot:
 
         # Quick categories via reply keyboard
         if txt == "otc fx":
-            try:
-                bot.send_message(m.chat.id, "Select OTC asset:", reply_markup=build_quick_assets_reply_kb())
-            except Exception:
-                pass
-            try:
-                bot.send_message(m.chat.id, "OTC FX", reply_markup=build_assets_list_kb("otc"))
-            except Exception:
-                pass
+            ASSETS_STATE[m.from_user.id] = {"cat": "otc", "page": 0}
+            _show_assets_reply(m.chat.id, "otc", 0)
             return
         if txt == "live fx":
-            try:
-                bot.send_message(m.chat.id, "Select LIVE asset:", reply_markup=build_quick_assets_reply_kb())
-            except Exception:
-                pass
-            try:
-                bot.send_message(m.chat.id, "LIVE FX", reply_markup=build_assets_list_kb("live"))
-            except Exception:
-                pass
+            ASSETS_STATE[m.from_user.id] = {"cat": "live", "page": 0}
+            _show_assets_reply(m.chat.id, "live", 0)
+            return
+        if txt in ("◀ prev", "next ▶", "⬅️ categories"):
+            st = ASSETS_STATE.get(m.from_user.id) or {"cat": "live", "page": 0}
+            cat = st.get("cat", "live")
+            page = int(st.get("page", 0))
+            if txt == "◀ prev" and page > 0:
+                page -= 1
+            elif txt == "next ▶":
+                total_pages = (len(PAIRS_BASE) - 1) // 10
+                if page < total_pages:
+                    page += 1
+            elif txt == "⬅️ categories":
+                try:
+                    _send_kb_quietly(m.chat.id, build_quick_assets_reply_kb())
+                except Exception:
+                    pass
+                return
+            ASSETS_STATE[m.from_user.id] = {"cat": cat, "page": page}
+            _show_assets_reply(m.chat.id, cat, page)
+            return
+
+        # If user taps a pair from the reply list
+        if txt.upper() in {p.upper() for p in PAIRS_BASE}:
+            pair_txt = txt.upper()
+            code = pair_txt.replace("/", "")
+            st = ASSETS_STATE.get(m.from_user.id) or {"cat": "live"}
+            cat = st.get("cat", "live")
+            if cat == "otc":
+                code = f"{code}_OTC"
+            SIGNAL_LAST[m.from_user.id] = code
+            _send_kb_quietly(m.chat.id, build_timeframes_reply_kb())
             return
 
         # Existing shortcuts
@@ -1619,7 +1680,11 @@ if bot:
                     utils.send_safe(bot, m.chat.id, "🎟️ Free sample used for today. Upgrade to premium to continue.")
                     return
             try:
-                bot.send_message(m.chat.id, "Select market:", reply_markup=build_assets_kb())
+                _send_kb_quietly(m.chat.id, build_quick_assets_reply_kb())
+            except Exception:
+                pass
+            try:
+                bot.send_message(m.chat.id, "Choose category:")
             except Exception:
                 pass
 
@@ -1659,15 +1724,18 @@ if bot:
                     )
                     utils.send_safe(bot, m.chat.id, msg)
                     return
-            code_to_pair = {
-                "BTCUSDT": "BTC/USDT",
-                "ETHUSDT": "ETH/USDT",
-                "EURUSD": "EUR/USD",
-                "GBPJPY": "GBP/JPY",
-                "GOLD": "GOLD",
-                "NASDAQ": "NASDAQ",
-            }
-            pair = code_to_pair.get(asset_code, asset_code)
+            # Derive pair string from code
+            code = asset_code[:-4] if asset_code.endswith("_OTC") else asset_code
+            if len(code) == 6 and code.isalpha():
+                pair = f"{code[:3]}/{code[3:]}"
+            else:
+                code_to_pair = {
+                    "BTCUSDT": "BTC/USDT",
+                    "ETHUSDT": "ETH/USDT",
+                    "GOLD": "GOLD",
+                    "NASDAQ": "NASDAQ",
+                }
+                pair = code_to_pair.get(code, code)
             stop_loading_tf = start_chat_action(m.chat.id, "typing")
             try:
                 text = utils.generate_ensemble_signal(pair, txt)
@@ -1854,7 +1922,7 @@ if bot:
                 except Exception:
                     pass
                 try:
-                    bot.send_message(call.message.chat.id, "Select market:", reply_markup=build_assets_kb())
+                    bot.send_message(call.message.chat.id, "Choose category:")
                 except Exception:
                     pass
                 text = None
@@ -1952,7 +2020,11 @@ if bot:
             pass
         if action == "assets":
             try:
-                bot.send_message(call.message.chat.id, "Select market:", reply_markup=build_assets_kb())
+                _send_kb_quietly(call.message.chat.id, build_quick_assets_reply_kb())
+            except Exception:
+                pass
+            try:
+                bot.send_message(call.message.chat.id, "Choose category:")
             except Exception:
                 pass
 
@@ -1963,8 +2035,15 @@ if bot:
             bot.answer_callback_query(call.id)
         except Exception:
             pass
+        # Hide the inline keyboard and switch to reply keyboard list under chat
         try:
-            bot.send_message(call.message.chat.id, "Select an asset:", reply_markup=build_assets_list_kb(cat))
+            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+        except Exception:
+            pass
+        try:
+            uid = call.from_user.id
+            ASSETS_STATE[uid] = {"cat": cat, "page": 0}
+            _show_assets_reply(call.message.chat.id, cat, 0)
         except Exception:
             pass
 
@@ -1974,13 +2053,13 @@ if bot:
             bot.answer_callback_query(call.id)
         except Exception:
             pass
-        # Show the reply keyboard under chat and the inline category picker again
+        # Show the reply keyboard under chat and a hint message (no inline picker)
         try:
             _send_kb_quietly(call.message.chat.id, build_quick_assets_reply_kb())
         except Exception:
             pass
         try:
-            bot.send_message(call.message.chat.id, "Select market:", reply_markup=build_assets_kb())
+            bot.send_message(call.message.chat.id, "Choose category:")
         except Exception:
             pass
 
@@ -2002,8 +2081,15 @@ if bot:
             bot.answer_callback_query(call.id)
         except Exception:
             pass
+        # Hide the inline keyboard and switch to reply keyboard for timeframes
         try:
-            bot.send_message(call.message.chat.id, f"Timeframe for {asset_code}:", reply_markup=build_timeframes_kb(asset_code))
+            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+        except Exception:
+            pass
+        try:
+            SIGNAL_LAST[uid] = asset_code
+            _send_kb_quietly(call.message.chat.id, build_timeframes_reply_kb())
+            bot.send_message(call.message.chat.id, f"Choose timeframe for {asset_code}:")
         except Exception:
             pass
 

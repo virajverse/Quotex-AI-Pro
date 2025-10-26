@@ -1,15 +1,44 @@
 {% extends "base.html" %}
 {% block content %}
 <h2 class="section-title">Broadcast</h2>
-<div class="card" style="max-width:720px">
-  <form method="post" action="/admin/broadcast">
-    <label>Message</label>
-    <textarea name="text" rows="5" placeholder="Your broadcast message..."></textarea>
-    <label style="display:flex; gap:8px; align-items:center; margin-top:8px">
-      <input type="checkbox" name="premium_only" value="1"> Premium users only
-    </label>
-    <div style="margin-top:8px">
-      <button class="btn ok" type="submit">Send broadcast</button>
+<div class="card" style="max-width:920px">
+  <form method="post" action="/admin/broadcast" enctype="multipart/form-data">
+    <div class="row">
+      <div class="col">
+        <label>Message</label>
+        <textarea name="text" rows="7" placeholder="Your broadcast message (optional if sending image only)..."></textarea>
+        <label style="display:flex; gap:8px; align-items:center; margin-top:8px">
+          <input type="checkbox" name="premium_only" value="1"> Premium users only
+        </label>
+        <div style="margin-top:10px">
+          <label>Attach JPG (optional)</label>
+          <input type="file" name="image" accept="image/jpeg">
+          <div class="muted" style="margin-top:6px">Only .jpg/.jpeg allowed. If provided, image will be sent with the text as caption.</div>
+        </div>
+        <div style="margin-top:12px">
+          <button class="btn ok" type="submit">Send broadcast</button>
+        </div>
+      </div>
+      <div class="col">
+        <label>Telegram Buttons Visibility</label>
+        <div class="row" style="gap:8px">
+          {% set T = toggles or {} %}
+          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_SIGNUP" value="1" {% if T.get('UI_HIDE_SIGNUP') %}checked{% endif %}> Hide SIGN UP</label>
+          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_LOGIN" value="1" {% if T.get('UI_HIDE_LOGIN') %}checked{% endif %}> Hide LOGIN</label>
+          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_PROFILE" value="1" {% if T.get('UI_HIDE_PROFILE') %}checked{% endif %}> Hide PROFILE</label>
+          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_GET_STARTED" value="1" {% if T.get('UI_HIDE_GET_STARTED') %}checked{% endif %}> Hide GET STARTED</label>
+          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_HOW" value="1" {% if T.get('UI_HIDE_HOW') %}checked{% endif %}> Hide HOW IT WORKS</label>
+          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_LIVE_SIGNALS" value="1" {% if T.get('UI_HIDE_LIVE_SIGNALS') %}checked{% endif %}> Hide LIVE SIGNALS</label>
+          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_TOOLS" value="1" {% if T.get('UI_HIDE_TOOLS') %}checked{% endif %}> Hide ANALYSIS TOOLS</label>
+          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_PERF24H" value="1" {% if T.get('UI_HIDE_PERF24H') %}checked{% endif %}> Hide 24H VIP PROFIT</label>
+          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_HOURS" value="1" {% if T.get('UI_HIDE_HOURS') %}checked{% endif %}> Hide MARKET HOURS</label>
+          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_PLAN" value="1" {% if T.get('UI_HIDE_PLAN') %}checked{% endif %}> Hide PLAN STATUS</label>
+          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_SUPPORT" value="1" {% if T.get('UI_HIDE_SUPPORT') %}checked{% endif %}> Hide SUPPORT</label>
+          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_DISCLAIMER" value="1" {% if T.get('UI_HIDE_DISCLAIMER') %}checked{% endif %}> Hide RISK DISCLAIMER</label>
+          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_SELECT_PLAN" value="1" {% if T.get('UI_HIDE_SELECT_PLAN') %}checked{% endif %}> Hide SELECT A PLAN (reply)</label>
+        </div>
+        <div class="muted" style="margin-top:8px">Submit with empty message/image to save only visibility settings.</div>
+      </div>
     </div>
   </form>
 </div>

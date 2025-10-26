@@ -698,6 +698,60 @@ def _market_open_for_asset(asset: str, now_utc: Optional[datetime] = None) -> bo
     return True
 
 
+def next_open_for_asset(asset: str, now_utc: Optional[datetime] = None) -> Optional[datetime]:
+    """Return next market open time (UTC) for the given asset, or None if already open or unknown.
+    Uses the same approximations as market_hours_message().
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    cls = _classify_asset(asset)
+    if cls == "crypto":
+        return None  # 24/7
+    if cls == "forex":
+        # Next open: Sunday 21:00 UTC if currently closed
+        # Closed windows: Fri >= 21:00 UTC until Sun < 21:00 UTC
+        wd = now_utc.weekday()
+        hr = now_utc.hour
+        open_now = (wd in (0,1,2,3)) or (wd == 4 and hr < 21) or (wd == 6 and hr >= 21)
+        if open_now:
+            return None
+        # compute upcoming Sunday 21:00 UTC
+        days_to_sun = (6 - wd) % 7
+        open_day = (now_utc + timedelta(days=days_to_sun)).date()
+        open_dt = datetime.combine(open_day, time(21, 0), tzinfo=timezone.utc)
+        if open_dt <= now_utc:
+            open_dt += timedelta(days=7)
+        return open_dt
+    if cls == "gold":
+        # Daily break 22:00-23:00 UTC; weekend closed until Sun 23:00 UTC
+        wd, hr = now_utc.weekday(), now_utc.hour
+        # If in daily break Mon-Thu 22:00-23:00 UTC
+        if hr == 22 and wd in (0,1,2,3,4):
+            return datetime.combine(now_utc.date(), time(23, 0), tzinfo=timezone.utc)
+        # Sunday before 23:00 → open at 23:00
+        if wd == 6 and hr < 23:
+            return datetime.combine(now_utc.date(), time(23, 0), tzinfo=timezone.utc)
+        # If Friday after 22:00 or Saturday → next Sunday 23:00
+        if wd == 5 or (wd == 4 and hr >= 22):
+            next_sun = _next_weekday(now_utc, 6)
+            return datetime.combine(next_sun.date(), time(23, 0), tzinfo=timezone.utc)
+        return None  # otherwise considered open
+    if cls == "index":
+        # NASDAQ cash session 9:30-16:00 America/New_York
+        ny = ZoneInfo("America/New_York")
+        t = now_utc.astimezone(ny)
+        if t.weekday() < 5 and time(9,30) <= t.time() < time(16,0):
+            return None
+        # find next weekday at 9:30
+        next_day = t
+        while True:
+            next_day = (next_day + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            if next_day.weekday() < 5:
+                break
+        open_dt_ny = datetime.combine(next_day.date(), time(9, 30), tzinfo=ny)
+        return open_dt_ny.astimezone(timezone.utc)
+    return None
+
+
 def generate_smart_signal(asset: Optional[str] = None, timeframe: str = "5m") -> str:
     """Multi-confirmation signal with live data if available.
     Priority: Finnhub -> TwelveData -> AlphaVantage. Falls back to pseudo if none.

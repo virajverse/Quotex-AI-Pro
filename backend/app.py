@@ -221,7 +221,19 @@ def admin_message():
 @app.get("/admin/broadcast")
 @ui_login_required
 def admin_broadcast_page():
-    return render_template("admin/broadcast.html")
+    keys = [
+        "UI_HIDE_SIGNUP","UI_HIDE_LOGIN","UI_HIDE_PROFILE","UI_HIDE_GET_STARTED","UI_HIDE_HOW",
+        "UI_HIDE_LIVE_SIGNALS","UI_HIDE_TOOLS","UI_HIDE_PERF24H","UI_HIDE_HOURS","UI_HIDE_PLAN",
+        "UI_HIDE_SUPPORT","UI_HIDE_DISCLAIMER","UI_HIDE_SELECT_PLAN"
+    ]
+    toggles = {}
+    for k in keys:
+        try:
+            v = db.get_setting(k)
+            toggles[k] = str(v).lower() in ("1","true","yes","on")
+        except Exception:
+            toggles[k] = False
+    return render_template("admin/broadcast.html", toggles=toggles)
 
 
 @app.post("/admin/broadcast")
@@ -229,15 +241,59 @@ def admin_broadcast_page():
 def admin_broadcast_post():
     text = (request.form.get("text") or "").strip()
     premium_only = bool(request.form.get("premium_only"))
-    if not text:
-        flash("Provide text", "warning")
+    # Save UI toggle settings
+    keys = [
+        "UI_HIDE_SIGNUP","UI_HIDE_LOGIN","UI_HIDE_PROFILE","UI_HIDE_GET_STARTED","UI_HIDE_HOW",
+        "UI_HIDE_LIVE_SIGNALS","UI_HIDE_TOOLS","UI_HIDE_PERF24H","UI_HIDE_HOURS","UI_HIDE_PLAN",
+        "UI_HIDE_SUPPORT","UI_HIDE_DISCLAIMER","UI_HIDE_SELECT_PLAN"
+    ]
+    for k in keys:
+        try:
+            db.set_setting(k, "1" if request.form.get(k) else "0")
+        except Exception:
+            pass
+    # Handle image upload (JPG)
+    file = None
+    try:
+        file = request.files.get("image")
+    except Exception:
+        file = None
+    img_bytes = None
+    if file and getattr(file, 'filename', ''):
+        fname = (file.filename or '').lower()
+        ctype = (file.mimetype or '').lower()
+        if fname.endswith('.jpg') or fname.endswith('.jpeg') or 'jpeg' in ctype:
+            try:
+                data = file.read()
+                if data:
+                    img_bytes = data
+            except Exception:
+                img_bytes = None
+        else:
+            flash("Only JPG/JPEG images are allowed", "warning")
+            return redirect(url_for("admin_broadcast_page"))
+    # If neither text nor image, just report settings saved
+    if not text and not img_bytes:
+        flash("Settings updated", "success")
         return redirect(url_for("admin_broadcast_page"))
+    # Send broadcast
     users = db.list_users_for_broadcast(premium_only=premium_only)
     sent = 0
     for u in users:
-        if bot and utils.send_safe(bot, u["telegram_id"], text):
-            sent += 1
-    db.log_admin("broadcast", {"premium_only": premium_only, "text_len": len(text), "count": len(users), "sent": sent}, performed_by="panel")
+        if not bot:
+            continue
+        try:
+            if img_bytes:
+                bio = io.BytesIO(img_bytes)
+                bio.name = "broadcast.jpg"
+                bot.send_photo(u["telegram_id"], bio, caption=(text or None))
+                sent += 1
+            else:
+                if utils.send_safe(bot, u["telegram_id"], text):
+                    sent += 1
+        except Exception:
+            continue
+    db.log_admin("broadcast", {"premium_only": premium_only, "text_len": len(text), "count": len(users), "sent": sent, "has_image": bool(img_bytes)}, performed_by="panel")
     flash(f"Broadcast sent: {sent}/{len(users)}", "success")
     return redirect(url_for("admin_broadcast_page"))
 
@@ -628,31 +684,49 @@ if bot:
     # ----- Main Menu UI -----
     def build_main_menu(user):
         kb = types.InlineKeyboardMarkup(row_width=2)
-        registered = bool(user)
-        if not registered:
-            kb.add(
-                types.InlineKeyboardButton("✅ SIGN UP", callback_data="menu:signup"),
-                types.InlineKeyboardButton("🔑 LOGIN", callback_data="menu:login"),
-            )
-        else:
+        premium = _user_has_premium(user)
+        def _b(key: str) -> bool:
+            try:
+                v = db.get_setting(key)
+                return str(v).lower() in ("1","true","yes","on")
+            except Exception:
+                return False
+        # Auth row
+        if not _b("UI_HIDE_SIGNUP") and not bool(user):
+            kb.add(types.InlineKeyboardButton("✅ SIGN UP", callback_data="menu:signup"))
+        if not _b("UI_HIDE_LOGIN") and not bool(user):
+            kb.add(types.InlineKeyboardButton("🔑 LOGIN", callback_data="menu:login"))
+        if not _b("UI_HIDE_PROFILE") and bool(user):
             kb.add(types.InlineKeyboardButton("👤 PROFILE", callback_data="menu:profile"))
-        kb.add(
-            types.InlineKeyboardButton("🚀 GET STARTED", callback_data="menu:get_started"),
-            types.InlineKeyboardButton("❓ HOW IT WORKS", callback_data="menu:how"),
-        )
-        kb.add(
-            types.InlineKeyboardButton("📈 LIVE SIGNALS", callback_data="menu:signals"),
-            types.InlineKeyboardButton("📊 ANALYSIS TOOLS", callback_data="menu:tools"),
-        )
-        kb.add(types.InlineKeyboardButton("🔥 24H VIP PROFIT", callback_data="menu:perf24h"))
-        kb.add(
-            types.InlineKeyboardButton("🕒 MARKET HOURS", callback_data="menu:hours"),
-            types.InlineKeyboardButton("📅 PLAN STATUS", callback_data="menu:plan"),
-        )
-        kb.add(
-            types.InlineKeyboardButton("💬 SUPPORT", callback_data="menu:support"),
-        )
-        kb.add(types.InlineKeyboardButton("⚠️ RISK DISCLAIMER", callback_data="menu:disclaimer"))
+        # Getting started / how
+        row = []
+        if not _b("UI_HIDE_GET_STARTED") and not premium:
+            row.append(types.InlineKeyboardButton("🚀 GET STARTED", callback_data="menu:get_started"))
+        if not _b("UI_HIDE_HOW"):
+            row.append(types.InlineKeyboardButton("❓ HOW IT WORKS", callback_data="menu:how"))
+        if row:
+            kb.add(*row)
+        # Main actions
+        row = []
+        if not _b("UI_HIDE_LIVE_SIGNALS"):
+            row.append(types.InlineKeyboardButton("📈 LIVE SIGNALS", callback_data="menu:signals"))
+        if not _b("UI_HIDE_TOOLS"):
+            row.append(types.InlineKeyboardButton("📊 ANALYSIS TOOLS", callback_data="menu:tools"))
+        if row:
+            kb.add(*row)
+        if not _b("UI_HIDE_PERF24H"):
+            kb.add(types.InlineKeyboardButton("🔥 24H VIP PROFIT", callback_data="menu:perf24h"))
+        row = []
+        if not _b("UI_HIDE_HOURS"):
+            row.append(types.InlineKeyboardButton("🕒 MARKET HOURS", callback_data="menu:hours"))
+        if not _b("UI_HIDE_PLAN"):
+            row.append(types.InlineKeyboardButton("📅 PLAN STATUS", callback_data="menu:plan"))
+        if row:
+            kb.add(*row)
+        if not _b("UI_HIDE_SUPPORT"):
+            kb.add(types.InlineKeyboardButton("💬 SUPPORT", callback_data="menu:support"))
+        if not _b("UI_HIDE_DISCLAIMER"):
+            kb.add(types.InlineKeyboardButton("⚠️ RISK DISCLAIMER", callback_data="menu:disclaimer"))
         return kb
 
     # --- Assets: OTC vs LIVE (user-provided FX list) ---
@@ -722,18 +796,37 @@ if bot:
 
     def build_main_reply_kb(user):
         kb = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True, one_time_keyboard=False, selective=False)
-        registered = bool(user)
-        if not registered:
-            kb.add(types.KeyboardButton("✅ SIGN UP"), types.KeyboardButton("🔑 LOGIN"))
+        premium = _user_has_premium(user)
+        def _b(key: str) -> bool:
+            try:
+                v = db.get_setting(key)
+                return str(v).lower() in ("1","true","yes","on")
+            except Exception:
+                return False
+        if not bool(user):
+            row = []
+            if not _b("UI_HIDE_SIGNUP"): row.append(types.KeyboardButton("✅ SIGN UP"))
+            if not _b("UI_HIDE_LOGIN"): row.append(types.KeyboardButton("🔑 LOGIN"))
+            if row: kb.add(*row)
         else:
-            kb.add(types.KeyboardButton("👤 PROFILE"))
-        kb.add(types.KeyboardButton("🚀 GET STARTED"), types.KeyboardButton("❓ HOW IT WORKS"))
-        kb.add(types.KeyboardButton("📈 LIVE SIGNALS"), types.KeyboardButton("📊 ANALYSIS TOOLS"))
-        kb.add(types.KeyboardButton("🔥 24H VIP PROFIT"))
-        kb.add(types.KeyboardButton("🕒 MARKET HOURS"), types.KeyboardButton("📅 PLAN STATUS"))
-        kb.add(types.KeyboardButton("SELECT A PLAN"))
-        kb.add(types.KeyboardButton("💬 SUPPORT"))
-        kb.add(types.KeyboardButton("⚠️ RISK DISCLAIMER"))
+            if not _b("UI_HIDE_PROFILE"):
+                kb.add(types.KeyboardButton("👤 PROFILE"))
+        row = []
+        if not _b("UI_HIDE_GET_STARTED") and not premium: row.append(types.KeyboardButton("🚀 GET STARTED"))
+        if not _b("UI_HIDE_HOW"): row.append(types.KeyboardButton("❓ HOW IT WORKS"))
+        if row: kb.add(*row)
+        row = []
+        if not _b("UI_HIDE_LIVE_SIGNALS"): row.append(types.KeyboardButton("📈 LIVE SIGNALS"))
+        if not _b("UI_HIDE_TOOLS"): row.append(types.KeyboardButton("📊 ANALYSIS TOOLS"))
+        if row: kb.add(*row)
+        if not _b("UI_HIDE_PERF24H"): kb.add(types.KeyboardButton("🔥 24H VIP PROFIT"))
+        row = []
+        if not _b("UI_HIDE_HOURS"): row.append(types.KeyboardButton("🕒 MARKET HOURS"))
+        if not _b("UI_HIDE_PLAN"): row.append(types.KeyboardButton("📅 PLAN STATUS"))
+        if row: kb.add(*row)
+        if not _b("UI_HIDE_SELECT_PLAN"): kb.add(types.KeyboardButton("SELECT A PLAN"))
+        if not _b("UI_HIDE_SUPPORT"): kb.add(types.KeyboardButton("💬 SUPPORT"))
+        if not _b("UI_HIDE_DISCLAIMER"): kb.add(types.KeyboardButton("⚠️ RISK DISCLAIMER"))
         return kb
 
     def build_products_reply_kb():
@@ -913,7 +1006,7 @@ if bot:
 
     def build_quick_assets_reply_kb():
         kb = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-        kb.add(types.KeyboardButton("OTC FX"), types.KeyboardButton("LIVE FX"))
+        kb.add(types.KeyboardButton("LIVE FX"))
         kb.add(types.KeyboardButton("🏠 Main Menu"), types.KeyboardButton("👤 Profile"))
         return kb
 
@@ -1631,10 +1724,6 @@ if bot:
             return
 
         # Quick categories via reply keyboard
-        if txt == "otc fx":
-            ASSETS_STATE[m.from_user.id] = {"cat": "otc", "page": 0}
-            _show_assets_reply(m.chat.id, "otc", 0)
-            return
         if txt == "live fx":
             ASSETS_STATE[m.from_user.id] = {"cat": "live", "page": 0}
             _show_assets_reply(m.chat.id, "live", 0)
@@ -1707,6 +1796,32 @@ if bot:
                 return
             uid = m.from_user.id
             user = db.get_user_by_telegram_id(uid)
+            # Derive pair string from last selected code
+            code = asset_code[:-4] if asset_code.endswith("_OTC") else asset_code
+            if len(code) == 6 and code.isalpha():
+                pair = f"{code[:3]}/{code[3:]}"
+            else:
+                code_to_pair = {
+                    "BTCUSDT": "BTC/USDT",
+                    "ETHUSDT": "ETH/USDT",
+                    "GOLD": "GOLD",
+                    "NASDAQ": "NASDAQ",
+                }
+                pair = code_to_pair.get(code, code)
+            # Check market status before consuming quota
+            try:
+                open_now = utils._market_open_for_asset(pair)
+            except Exception:
+                open_now = True
+            if not open_now:
+                try:
+                    nxt = utils.next_open_for_asset(pair)
+                    when = utils.format_ts_iso(nxt) if nxt else "-"
+                    bot.send_message(m.chat.id, f"Market closed for {pair}. Next open: <b>{when}</b>")
+                except Exception:
+                    pass
+                return
+            # Consume quota only if open
             if not _user_has_premium(user):
                 today = datetime.now(timezone.utc).date().isoformat()
                 if FREE_SAMPLES.get(uid) == today:
@@ -1724,18 +1839,6 @@ if bot:
                     )
                     utils.send_safe(bot, m.chat.id, msg)
                     return
-            # Derive pair string from code
-            code = asset_code[:-4] if asset_code.endswith("_OTC") else asset_code
-            if len(code) == 6 and code.isalpha():
-                pair = f"{code[:3]}/{code[3:]}"
-            else:
-                code_to_pair = {
-                    "BTCUSDT": "BTC/USDT",
-                    "ETHUSDT": "ETH/USDT",
-                    "GOLD": "GOLD",
-                    "NASDAQ": "NASDAQ",
-                }
-                pair = code_to_pair.get(code, code)
             stop_loading_tf = start_chat_action(m.chat.id, "typing")
             try:
                 text = utils.generate_ensemble_signal(pair, txt)
@@ -2031,6 +2134,8 @@ if bot:
     @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("assets:"))
     def on_assets_category(call: types.CallbackQuery):
         cat = call.data.split(":", 1)[1]
+        if cat == "otc":
+            cat = "live"
         try:
             bot.answer_callback_query(call.id)
         except Exception:
@@ -2108,6 +2213,23 @@ if bot:
         _, asset_code, tf = call.data.split(":", 2)
         code = asset_code[:-4] if asset_code.endswith("_OTC") else asset_code
         pair = (f"{code[:3]}/{code[3:]}" if len(code) == 6 else code)
+        # Do not consume quota if market closed; show next open time instead
+        try:
+            open_now = utils._market_open_for_asset(pair)
+        except Exception:
+            open_now = True
+        if not open_now:
+            try:
+                nxt = utils.next_open_for_asset(pair)
+                when = utils.format_ts_iso(nxt) if nxt else "-"
+                bot.answer_callback_query(call.id)
+            except Exception:
+                pass
+            try:
+                bot.send_message(call.message.chat.id, f"Market closed for {pair}. Next open: <b>{when}</b>")
+            except Exception:
+                pass
+            return
         if _user_has_premium(user):
             quota = db.consume_signal_by_telegram_id(uid)
             if not quota.get("ok"):

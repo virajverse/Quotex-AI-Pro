@@ -76,6 +76,14 @@ def init_db():
         )
         ''')
 
+        # Settings key-value store
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+        ''')
+
         # Products table
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS products (
@@ -801,6 +809,28 @@ def expire_past_due() -> int:
         cursor.execute('UPDATE users SET is_premium = 0 WHERE is_premium = 1 AND premium_until < CURRENT_TIMESTAMP')
         conn.commit()
         return cursor.rowcount if hasattr(cursor, 'rowcount') else 0
+
+# -------- Settings (key/value) --------
+def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    if not key:
+        return default
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT value FROM settings WHERE key = ?', (key,))
+        row = cursor.fetchone()
+        return (row['value'] if row and 'value' in row.keys() else None) or default
+
+def set_setting(key: str, value: Optional[str]):
+    if not key:
+        return
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+        INSERT INTO settings (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        ''', (key, (str(value) if value is not None else None)))
+        conn.commit()
 
 # -------- Sync helpers (SQLite full rows) --------
 def list_all_users_full() -> List[Dict[str, Any]]:

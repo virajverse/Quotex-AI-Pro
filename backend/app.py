@@ -1336,7 +1336,7 @@ if bot:
 
     @bot.message_handler(commands=["hours"])
     def cmd_hours(m: types.Message):
-        msg = utils.market_hours_message()
+        msg = utils.market_hours_message_for_pairs(PAIRS_BASE)
         try:
             bot.send_message(m.chat.id, msg, reply_markup=build_basic_nav_kb())
         except Exception:
@@ -2034,7 +2034,7 @@ if bot:
         elif action == "tools":
             text = "📊 Analysis tools coming soon."
         elif action == "hours":
-            text = utils.market_hours_message()
+            text = utils.market_hours_message_for_pairs(PAIRS_BASE)
         elif action == "perf24h":
             text = utils.generate_24h_served_report(db)
         elif action == "plan":

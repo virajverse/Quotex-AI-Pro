@@ -369,6 +369,79 @@ def market_hours_message() -> str:
     ]
     return "\n".join(lines)
 
+
+def market_hours_message_for_pairs(pairs: list[str]) -> str:
+    disp_tz = ZoneInfo(os.getenv("TIMEZONE", "UTC"))
+    now_utc = datetime.now(timezone.utc)
+    now_disp = now_utc.astimezone(disp_tz)
+
+    # FX open/close helpers (24x5) UTC
+    def fx_is_open(t: datetime) -> bool:
+        wd = t.weekday(); h = t.hour
+        if wd in (0,1,2,3):
+            return True
+        if wd == 4:
+            return h < 21
+        if wd == 6:
+            return h >= 21
+        return False
+
+    def fx_next_open_close(t: datetime) -> dict:
+        if fx_is_open(t):
+            days_to_fri = (4 - t.weekday()) % 7
+            close_day = (t + timedelta(days=days_to_fri)).date()
+            close_dt = datetime.combine(close_day, time(21, 0), tzinfo=timezone.utc)
+            if close_dt <= t:
+                close_dt += timedelta(days=7)
+            return {"open": None, "close": close_dt}
+        days_to_sun = (6 - t.weekday()) % 7
+        open_day = (t + timedelta(days=days_to_sun)).date()
+        open_dt = datetime.combine(open_day, time(21, 0), tzinfo=timezone.utc)
+        if open_dt <= t:
+            open_dt += timedelta(days=7)
+        return {"open": open_dt, "close": None}
+
+    fx_open = fx_is_open(now_utc)
+    fx_times = fx_next_open_close(now_utc)
+    fx_header = (
+        f"LIVE FX — OPEN (24x5) · Next close: {_fmt(fx_times['close'], disp_tz)}"
+        if fx_open else
+        f"LIVE FX — CLOSED (Weekend) · Next open: {_fmt(fx_times['open'], disp_tz)}"
+    )
+
+    # Sessions (local time windows)
+    def _sess_line(name: str, z: str, start: time, end: time) -> str:
+        zone = ZoneInfo(z)
+        now_local = now_utc.astimezone(zone)
+        open_today = (now_local.weekday() < 5) and (start <= now_local.time() < end)
+        return f"{name}: {now_local.strftime('%H:%M %Z')} — {start.strftime('%H:%M')}–{end.strftime('%H:%M')} {'OPEN' if open_today else 'CLOSED'}"
+
+    sessions = [
+        _sess_line("Tokyo", "Asia/Tokyo", time(9,0), time(18,0)),
+        _sess_line("London", "Europe/London", time(8,0), time(17,0)),
+        _sess_line("New York", "America/New_York", time(8,0), time(17,0)),
+    ]
+
+    pairs = [p for p in pairs or [] if "/" in (p or "")]  # only valid
+    pair_lines = []
+    if fx_open:
+        pair_lines = [f"{p} — OPEN (24x5)" for p in pairs]
+    else:
+        nxt = _fmt(fx_times['open'], disp_tz)
+        pair_lines = [f"{p} — CLOSED · Next open: {nxt}" for p in pairs]
+
+    lines = [
+        f"🕒 Now: {now_disp.strftime('%Y-%m-%d %H:%M %Z')}",
+        fx_header,
+        "",
+        "Sessions (local time):",
+        *sessions,
+        "",
+        "Pairs:",
+        *pair_lines,
+    ]
+    return "\n".join(lines)
+
 # ---------- Served signals (real) helpers ----------
 def direction_from_signal_text(text: str) -> Optional[str]:
     t = (text or "").upper()

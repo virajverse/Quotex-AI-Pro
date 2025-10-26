@@ -95,6 +95,28 @@ if bot:
         except Exception:
             logger.exception("Failed to start polling thread")
 
+@app.get("/favicon.ico")
+@app.get("/favicon.png")
+@app.get("/apple-touch-icon.png")
+def favicon_route():
+    try:
+        name = request.path.rsplit("/", 1)[-1]
+        assets_dir = os.path.join(os.path.dirname(__file__), "assets")
+        # Try exact name, then sensible fallbacks
+        candidates = [
+            os.path.join(assets_dir, name),
+            os.path.join(assets_dir, "favicon.ico"),
+            os.path.join(assets_dir, "favicon.png"),
+            os.path.join(assets_dir, "apple-touch-icon.png"),
+        ]
+        for p in candidates:
+            if os.path.exists(p):
+                mt = "image/x-icon" if p.endswith(".ico") else "image/png"
+                return send_file(p, mimetype=mt, cache_timeout=86400)
+    except Exception:
+        pass
+    return ("", 404)
+
 def require_admin(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -296,6 +318,80 @@ def admin_broadcast_post():
     db.log_admin("broadcast", {"premium_only": premium_only, "text_len": len(text), "count": len(users), "sent": sent, "has_image": bool(img_bytes)}, performed_by="panel")
     flash(f"Broadcast sent: {sent}/{len(users)}", "success")
     return redirect(url_for("admin_broadcast_page"))
+
+
+@app.get("/admin/branding")
+@ui_login_required
+def admin_branding_get():
+    assets_dir = os.path.join(os.path.dirname(__file__), "assets")
+    fav_ico = os.path.join(assets_dir, "favicon.ico")
+    fav_png = os.path.join(assets_dir, "favicon.png")
+    touch_png = os.path.join(assets_dir, "apple-touch-icon.png")
+    ctx = {
+        "has_favicon": os.path.exists(fav_ico) or os.path.exists(fav_png),
+        "has_touch": os.path.exists(touch_png),
+    }
+    return render_template("admin/branding.html", **ctx)
+
+
+@app.post("/admin/branding")
+@ui_login_required
+def admin_branding_post():
+    assets_dir = os.path.join(os.path.dirname(__file__), "assets")
+    try:
+        os.makedirs(assets_dir, exist_ok=True)
+    except Exception:
+        pass
+    # Handle favicon upload (.ico or .png)
+    fav = None
+    touch = None
+    try:
+        fav = request.files.get("favicon")
+    except Exception:
+        fav = None
+    try:
+        touch = request.files.get("apple_touch")
+    except Exception:
+        touch = None
+    saved = []
+    if fav and getattr(fav, 'filename', ''):
+        fname = secure_filename(fav.filename)
+        lower = fname.lower()
+        if lower.endswith('.ico'):
+            path = os.path.join(assets_dir, 'favicon.ico')
+            fav.save(path)
+            saved.append('favicon.ico')
+        elif lower.endswith('.png'):
+            path = os.path.join(assets_dir, 'favicon.png')
+            fav.save(path)
+            saved.append('favicon.png')
+        else:
+            flash("Favicon must be .ico or .png", "warning")
+    if touch and getattr(touch, 'filename', ''):
+        fname = secure_filename(touch.filename)
+        lower = fname.lower()
+        if lower.endswith('.png'):
+            path = os.path.join(assets_dir, 'apple-touch-icon.png')
+            touch.save(path)
+            saved.append('apple-touch-icon.png')
+        else:
+            flash("Apple Touch Icon must be .png", "warning")
+    # Auto-copy favicon.png to apple-touch-icon.png if not provided
+    try:
+        fav_png = os.path.join(assets_dir, 'favicon.png')
+        touch_png = os.path.join(assets_dir, 'apple-touch-icon.png')
+        if os.path.exists(fav_png) and not os.path.exists(touch_png) and 'apple-touch-icon.png' not in saved:
+            import shutil as _sh
+            _sh.copyfile(fav_png, touch_png)
+            saved.append('apple-touch-icon.png (copied)')
+    except Exception:
+        pass
+    if saved:
+        flash("Saved: " + ", ".join(saved), "success")
+        db.log_admin("branding", {"saved": saved}, performed_by="panel")
+    else:
+        flash("No files uploaded", "warning")
+    return redirect(url_for("admin_branding_get"))
 
 
 # ----- Admin: Verifications / Orders / Products -----

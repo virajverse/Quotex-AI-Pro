@@ -56,6 +56,8 @@ ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").strip()
 SECRET_KEY = os.getenv("SECRET_KEY", "").strip()
 SUPPORT_CONTACT = os.getenv("SUPPORT_CONTACT", "@support").strip()
+REQUIRED_CHANNEL_URL = os.getenv("REQUIRED_CHANNEL_URL", "https://t.me/QuotexAI_Pro").strip()
+REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "").strip()
 
 # Session secret key for Admin Panel
 if SECRET_KEY:
@@ -94,6 +96,55 @@ if bot:
             threading.Thread(target=_polling, name="bot-polling", daemon=True).start()
         except Exception:
             logger.exception("Failed to start polling thread")
+
+    # ----- Channel membership gate -----
+    def _parse_channel_chat_id() -> Optional[str]:
+        uname = REQUIRED_CHANNEL
+        if not uname and REQUIRED_CHANNEL_URL:
+            try:
+                if "t.me/" in REQUIRED_CHANNEL_URL:
+                    seg = REQUIRED_CHANNEL_URL.rsplit("/", 1)[-1].strip()
+                    if seg:
+                        uname = ("@" + seg) if not seg.startswith("@") else seg
+            except Exception:
+                uname = None
+        return uname or None
+
+    def _join_channel_url() -> Optional[str]:
+        if REQUIRED_CHANNEL_URL:
+            return REQUIRED_CHANNEL_URL
+        cid = _parse_channel_chat_id()
+        if cid and cid.startswith("@"):
+            return f"https://t.me/{cid[1:]}"
+        return None
+
+    def _build_join_kb():
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        url = _join_channel_url() or "https://t.me/"
+        kb.add(types.InlineKeyboardButton("🔔 Join Channel", url=url))
+        kb.add(types.InlineKeyboardButton("✅ I've Joined", callback_data="chk:joined"))
+        return kb
+
+    def _is_channel_member(uid: int) -> Optional[bool]:
+        chat_id = _parse_channel_chat_id()
+        if not chat_id:
+            return True
+        try:
+            cm = bot.get_chat_member(chat_id, uid)
+            st = getattr(cm, 'status', None) or (cm.status if hasattr(cm, 'status') else None)
+            return st in ("member", "administrator", "creator")
+        except Exception:
+            return False
+
+    def _require_channel(chat_id: int, uid: int) -> bool:
+        ok = _is_channel_member(uid)
+        if ok:
+            return True
+        try:
+            bot.send_message(chat_id, "📢 Please join our channel to use this bot:", reply_markup=_build_join_kb())
+        except Exception:
+            pass
+        return False
 
 @app.get("/favicon.ico")
 @app.get("/favicon.png")
@@ -1246,6 +1297,12 @@ if bot:
 
     @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("plan:"))
     def on_plan_select(call: types.CallbackQuery):
+        if not _require_channel(call.message.chat.id, call.from_user.id):
+            try:
+                bot.answer_callback_query(call.id)
+            except Exception:
+                pass
+            return
         pid = int(call.data.split(":", 1)[1])
         uid = call.from_user.id
         user = db.get_user_by_telegram_id(uid) or (
@@ -1305,6 +1362,8 @@ if bot:
                     return True
         except Exception:
             pass
+        if not _require_channel(m.chat.id, m.from_user.id):
+            return
         user = db.get_user_by_telegram_id(m.from_user.id) or (
             db.upsert_user(m.from_user.id, m.from_user.username or "", m.from_user.first_name or "", m.from_user.last_name or "", m.from_user.language_code or None) or
             db.get_user_by_telegram_id(m.from_user.id)
@@ -1344,6 +1403,8 @@ if bot:
                     return True
         except Exception:
             pass
+        if not _require_channel(m.chat.id, m.from_user.id):
+            return False
         user = db.get_user_by_telegram_id(m.from_user.id) or (
             db.upsert_user(m.from_user.id, m.from_user.username or "", m.from_user.first_name or "", m.from_user.last_name or "", m.from_user.language_code or None) or
             db.get_user_by_telegram_id(m.from_user.id)
@@ -1378,6 +1439,8 @@ if bot:
 
     @bot.message_handler(commands=["start"])
     def cmd_start(m: types.Message):
+        if not _require_channel(m.chat.id, m.from_user.id):
+            return
         u = m.from_user
         # Do not auto-register; show SIGN UP / LOGIN until user explicitly registers
         user = db.get_user_by_telegram_id(u.id)
@@ -1390,10 +1453,14 @@ if bot:
 
     @bot.message_handler(commands=["help"])
     def cmd_help(m: types.Message):
+        if not _require_channel(m.chat.id, m.from_user.id):
+            return
         utils.send_safe(bot, m.chat.id, "Commands:\n/id\n/status\n/pricing\n/premium\n/menu\n/signal\n/hours\n/verify_upi <txn_id>\n/verify_usdt <tx_hash>")
 
     @bot.message_handler(commands=["pricing"])
     def cmd_pricing(m: types.Message):
+        if not _require_channel(m.chat.id, m.from_user.id):
+            return
         try:
             send_pricing_card(m.chat.id)
         except Exception as e:
@@ -1405,6 +1472,8 @@ if bot:
 
     @bot.message_handler(commands=["menu"])
     def cmd_menu(m: types.Message):
+        if not _require_channel(m.chat.id, m.from_user.id):
+            return
         user = db.get_user_by_telegram_id(m.from_user.id)
         try:
             bot.send_message(m.chat.id, "Choose an option:", reply_markup=build_main_reply_kb(user))
@@ -1413,6 +1482,8 @@ if bot:
 
     @bot.message_handler(commands=["signal"])
     def cmd_signal(m: types.Message):
+        if not _require_channel(m.chat.id, m.from_user.id):
+            return
         user = db.get_user_by_telegram_id(m.from_user.id)
         uid = m.from_user.id
         if not _user_has_premium(user):
@@ -1432,6 +1503,8 @@ if bot:
 
     @bot.message_handler(commands=["hours"])
     def cmd_hours(m: types.Message):
+        if not _require_channel(m.chat.id, m.from_user.id):
+            return
         msg = utils.market_hours_message_for_pairs(PAIRS_BASE)
         try:
             bot.send_message(m.chat.id, msg, reply_markup=build_basic_nav_kb())
@@ -1440,10 +1513,14 @@ if bot:
 
     @bot.message_handler(commands=["id"])
     def cmd_id(m: types.Message):
+        if not _require_channel(m.chat.id, m.from_user.id):
+            return
         utils.send_safe(bot, m.chat.id, f"Your Telegram ID: <code>{m.from_user.id}</code>")
 
     @bot.message_handler(commands=["status"])
     def cmd_status(m: types.Message):
+        if not _require_channel(m.chat.id, m.from_user.id):
+            return
         user = db.get_user_by_telegram_id(m.from_user.id)
         if not _user_has_premium(user):
             try:
@@ -1458,6 +1535,8 @@ if bot:
 
     @bot.message_handler(commands=["premium"])
     def cmd_premium(m: types.Message):
+        if not _require_channel(m.chat.id, m.from_user.id):
+            return
         # Show available plans first
         try:
             items = db.list_products(active_only=True)
@@ -1491,6 +1570,8 @@ if bot:
 
     @bot.message_handler(commands=["verify_upi"])
     def cmd_verify_upi(m: types.Message):
+        if not _require_channel(m.chat.id, m.from_user.id):
+            return
         parts = (m.text or "").split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip():
             utils.send_safe(bot, m.chat.id, "Usage: /verify_upi <txn_id>")
@@ -1513,6 +1594,8 @@ if bot:
 
     @bot.message_handler(commands=["verify_usdt"])
     def cmd_verify_usdt(m: types.Message):
+        if not _require_channel(m.chat.id, m.from_user.id):
+            return
         parts = (m.text or "").split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip():
             utils.send_safe(bot, m.chat.id, "Usage: /verify_usdt <tx_hash>")
@@ -1539,6 +1622,8 @@ if bot:
 
     @bot.message_handler(func=lambda m: True, content_types=["text"])
     def on_text(m: types.Message):
+        if not _require_channel(m.chat.id, m.from_user.id):
+            return
         try:
             db.touch_user_activity(m.from_user.id, saw=True, messaged=True)
         except Exception:
@@ -2081,6 +2166,12 @@ if bot:
         action = call.data.split(":", 1)[1]
         uid = call.from_user.id
         user = db.get_user_by_telegram_id(uid)
+        if not _require_channel(call.message.chat.id, uid):
+            try:
+                bot.answer_callback_query(call.id)
+            except Exception:
+                pass
+            return
         text = None
 
         if action in ("signup", "login"):
@@ -2114,6 +2205,13 @@ if bot:
                 "- Signals and updates are sent right in this chat."
             )
         elif action == "signals":
+            # Gate again before sending keyboards
+            if not _require_channel(call.message.chat.id, uid):
+                try:
+                    bot.answer_callback_query(call.id)
+                except Exception:
+                    pass
+                return
             today = datetime.now(timezone.utc).date().isoformat()
             if _user_has_premium(user) or FREE_SAMPLES.get(uid) != today:
                 try:

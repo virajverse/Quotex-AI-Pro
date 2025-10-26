@@ -14,6 +14,8 @@ import tempfile
 import telebot
 from telebot import types
 import json
+from urllib.parse import quote
+from typing import Optional
 
 try:
     from dotenv import load_dotenv
@@ -667,8 +669,108 @@ if bot:
         for p in items or []:
             label = f"{p.get('name')} — {p.get('days')}d"
             kb.add(types.KeyboardButton(label))
-        kb.add(types.KeyboardButton("⬅️ BACK"), types.KeyboardButton("🏠 HOME"))
+        kb.add(types.KeyboardButton("⬅️ back"), types.KeyboardButton("🏠 home"))
         return kb
+
+    def pricing_message() -> str:
+        try:
+            items = db.list_products(active_only=True)
+        except Exception:
+            items = []
+        if not items:
+            return "Pricing unavailable right now."
+        lines = [
+            "💰 Pricing",
+        ]
+        for p in items:
+            inr = p.get('price_inr')
+            usdt = p.get('price_usdt')
+            price_bits = []
+            if inr is not None:
+                try:
+                    price_bits.append(f"₹{int(inr) if float(inr).is_integer() else inr}")
+                except Exception:
+                    price_bits.append(f"₹{inr}")
+            if usdt is not None:
+                price_bits.append(f"${usdt} USDT")
+            price = ", ".join(price_bits) if price_bits else "N/A"
+            lines.append(f"• {p.get('name')} — {p.get('days')}d: {price}")
+        lines.append("")
+        lines.append("Select a plan below to continue.")
+        return "\n".join(lines)
+
+    def send_pricing_card(chat_id: int):
+        try:
+            items = db.list_products(active_only=True)
+        except Exception:
+            items = []
+        if not items:
+            try:
+                bot.send_message(chat_id, "Pricing unavailable right now.")
+            except Exception:
+                pass
+            return
+        img = None
+        try:
+            from PIL import Image, ImageDraw, ImageFont, ImageFilter
+            w, h = 1000, 120 + 180 * max(1, len(items))
+            bg = Image.new("RGB", (w, h), (10, 12, 22))
+            draw = ImageDraw.Draw(bg, "RGBA")
+            for i in range(0, h, 4):
+                c = 12 + int(8 * (i / h))
+                draw.line([(0, i), (w, i)], fill=(c, c, c + 6, 255))
+            accent = (0, 188, 255)
+            title = "Pricing"
+            try:
+                fp = os.getenv("FONT_PATH")
+                font_title = ImageFont.truetype(fp, 60) if fp else ImageFont.load_default()
+                font_sub = ImageFont.truetype(fp, 30) if fp else ImageFont.load_default()
+                font_card = ImageFont.truetype(fp, 36) if fp else ImageFont.load_default()
+                font_small = ImageFont.truetype(fp, 28) if fp else ImageFont.load_default()
+            except Exception:
+                font_title = ImageFont.load_default(); font_sub = ImageFont.load_default(); font_card = ImageFont.load_default(); font_small = ImageFont.load_default()
+            draw.rectangle([30, 30, w - 30, 110], outline=(30, 34, 56), width=2)
+            draw.text((50, 50), title, fill=(240, 240, 255), font=font_title)
+            draw.text((50, 100), "Select a plan below", fill=(160, 170, 190), font=font_sub)
+            y = 150
+            for p in items:
+                box_h = 150
+                draw.rectangle([30, y, w - 30, y + box_h], fill=(18, 20, 36), outline=(40, 45, 70), width=2)
+                draw.rectangle([30, y, 36, y + box_h], fill=accent)
+                name = f"{p.get('name')} — {p.get('days')}d"
+                inr = p.get('price_inr')
+                usdt = p.get('price_usdt')
+                price_bits = []
+                if inr is not None:
+                    try:
+                        price_bits.append(f"₹{int(inr) if float(inr).is_integer() else inr}")
+                    except Exception:
+                        price_bits.append(f"₹{inr}")
+                if usdt is not None:
+                    price_bits.append(f"${usdt} USDT")
+                price = ", ".join(price_bits) if price_bits else "N/A"
+                draw.text((60, y + 30), name, fill=(235, 238, 255), font=font_card)
+                draw.text((60, y + 90), price, fill=(0, 200, 180), font=font_small)
+                y += box_h + 20
+            img = bg
+        except Exception:
+            img = None
+        if img is None:
+            try:
+                bot.send_message(chat_id, pricing_message())
+            except Exception:
+                pass
+            return
+        try:
+            bio = io.BytesIO()
+            img.save(bio, format="PNG")
+            bio.seek(0)
+            bot.send_photo(chat_id, photo=bio, caption="Select a plan below.")
+        except Exception:
+            try:
+                bot.send_message(chat_id, pricing_message())
+            except Exception:
+                pass
 
     SIGNAL_LAST: dict[int, str] = {}
 
@@ -705,10 +807,85 @@ if bot:
 
     def build_payment_reply_kb():
         kb = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-        kb.add(types.KeyboardButton("✅ Verify UPI"), types.KeyboardButton("✅ Verify USDT"))
+        kb.add(types.KeyboardButton("📷 Scan UPI"), types.KeyboardButton("✅ Verify USDT"))
         kb.add(types.KeyboardButton("🧾 Upload Receipt"), types.KeyboardButton("👁️ View Receipt"))
         kb.add(types.KeyboardButton("🏠 Main Menu"), types.KeyboardButton("👤 Profile"))
         return kb
+
+    def build_upi_open_kb(upi_url: str):
+        try:
+            kb = types.InlineKeyboardMarkup(row_width=1)
+            kb.add(types.InlineKeyboardButton("🔗 Open UPI App", url=upi_url))
+            return kb
+        except Exception:
+            return None
+
+    def _upi_url(amount: Optional[float] = None, note: Optional[str] = None) -> Optional[str]:
+        pa = (os.getenv("UPI_ID") or "").strip()
+        if not pa:
+            return None
+        pn = (os.getenv("UPI_NAME") or os.getenv("BUSINESS_NAME") or "Payment").strip()
+        pairs = [("pa", pa), ("pn", pn), ("cu", "INR")]
+        if amount is not None:
+            try:
+                pairs.append(("am", f"{float(amount):.0f}" if float(amount).is_integer() else f"{float(amount):.2f}"))
+            except Exception:
+                pairs.append(("am", str(amount)))
+        if note:
+            pairs.append(("tn", note))
+        q = "&".join([f"{k}={quote(str(v), safe='')}" for k, v in pairs])
+        return f"upi://pay?{q}"
+
+    UPI_QR_STORE = os.path.join(os.path.dirname(__file__), 'upi_qr.txt')
+
+    def _read_qr_fid() -> Optional[str]:
+        try:
+            with open(UPI_QR_STORE, 'r', encoding='utf-8') as f:
+                v = (f.read() or '').strip()
+                return v or None
+        except Exception:
+            return None
+
+    def _write_qr_fid(fid: str):
+        try:
+            with open(UPI_QR_STORE, 'w', encoding='utf-8') as f:
+                f.write((fid or '').strip())
+        except Exception:
+            pass
+
+    def send_upi_qr(chat_id: int, amount: Optional[float] = None, note: Optional[str] = None):
+        upi_url = _upi_url(amount, note)
+        caption = "Scan this UPI QR to pay. After payment, tap '🧾 Upload Receipt' to submit your screenshot."
+        # Priority: file_id -> image URL -> generated QR URL -> fallback text
+        fid = (os.getenv("UPI_QR_FILE_ID") or "").strip() or _read_qr_fid()
+        img_url = (os.getenv("UPI_QR_IMAGE_URL") or "").strip()
+        if fid:
+            try:
+                bot.send_photo(chat_id, fid, caption=caption, reply_markup=build_upi_open_kb(upi_url) if upi_url else None)
+                return
+            except Exception:
+                pass
+        qr_from_upi = None
+        if upi_url:
+            try:
+                qr_from_upi = f"https://quickchart.io/qr?text={quote(upi_url, safe='')}&margin=2&size=400"
+            except Exception:
+                qr_from_upi = None
+        try:
+            if img_url:
+                bot.send_photo(chat_id, img_url, caption=caption, reply_markup=build_upi_open_kb(upi_url) if upi_url else None)
+                return
+            if qr_from_upi:
+                bot.send_photo(chat_id, qr_from_upi, caption=caption, reply_markup=build_upi_open_kb(upi_url))
+                return
+        except Exception:
+            pass
+        # Fallback text
+        try:
+            text = "Scan & Pay via UPI. " + (f"Open link: {upi_url}" if upi_url else "UPI ID not configured.")
+            bot.send_message(chat_id, text, reply_markup=build_payment_reply_kb())
+        except Exception:
+            pass
 
     def build_products_kb():
         kb = types.InlineKeyboardMarkup(row_width=1)
@@ -786,6 +963,17 @@ if bot:
     # --- Receipt upload handlers ---
     @bot.message_handler(content_types=["photo"])
     def on_receipt_photo(m: types.Message):
+        # Admin quick set QR: send photo with caption '#qr'
+        try:
+            admin_id = os.getenv("ADMIN_ID")
+            if admin_id and str(m.from_user.id) == str(admin_id) and m.caption and "#qr" in m.caption.lower():
+                file_id = m.photo[-1].file_id if m.photo else None
+                if file_id:
+                    _write_qr_fid(file_id)
+                    utils.send_safe(bot, m.chat.id, "✅ UPI QR updated.")
+                    return True
+        except Exception:
+            pass
         user = db.get_user_by_telegram_id(m.from_user.id) or (
             db.upsert_user(m.from_user.id, m.from_user.username or "", m.from_user.first_name or "", m.from_user.last_name or "", m.from_user.language_code or None) or
             db.get_user_by_telegram_id(m.from_user.id)
@@ -814,6 +1002,17 @@ if bot:
 
     @bot.message_handler(content_types=["document"])
     def on_receipt_doc(m: types.Message):
+        # Admin quick set QR via document (image file) with caption '#qr'
+        try:
+            admin_id = os.getenv("ADMIN_ID")
+            if admin_id and str(m.from_user.id) == str(admin_id) and m.caption and "#qr" in m.caption.lower() and m.document:
+                file_id = m.document.file_id
+                if file_id:
+                    _write_qr_fid(file_id)
+                    utils.send_safe(bot, m.chat.id, "✅ UPI QR updated.")
+                    return True
+        except Exception:
+            pass
         user = db.get_user_by_telegram_id(m.from_user.id) or (
             db.upsert_user(m.from_user.id, m.from_user.username or "", m.from_user.first_name or "", m.from_user.last_name or "", m.from_user.language_code or None) or
             db.get_user_by_telegram_id(m.from_user.id)
@@ -934,7 +1133,11 @@ if bot:
             except Exception:
                 pass
             return
-        # Show plans as a reply keyboard only (no visible message text)
+        # Show pricing card then show plans as a reply keyboard
+        try:
+            send_pricing_card(m.chat.id)
+        except Exception:
+            pass
         try:
             _send_kb_quietly(m.chat.id, build_products_reply_kb())
         except Exception:
@@ -1033,17 +1236,30 @@ if bot:
                 pass
             return
         # Verify buttons from reply keyboard
-        if "verify upi" in txt:
+        if "verify upi" in txt or "scan upi" in txt or "scan" == txt:
             try:
                 urow = db.get_user_by_telegram_id(m.from_user.id)
                 if urow and hasattr(db, 'get_latest_pending_order_by_user_and_method'):
                     order = db.get_latest_pending_order_by_user_and_method(urow['id'], None)
                     if order:
                         db.update_order_method(order['id'], 'upi')
+                # Try amount from selected order's product
+                amt = None
+                note = None
+                if order and order.get('product_id'):
+                    prod = db.get_product(order.get('product_id'))
+                    if prod:
+                        amt = prod.get('price_inr') if prod.get('price_inr') is not None else None
+                        note = f"{prod.get('name')} {prod.get('days')}d"
+            except Exception:
+                amt = None
+                note = None
+            try:
+                bot.send_message(m.chat.id, "📷 Scan the UPI QR below to pay. After paying, tap '🧾 Upload Receipt' and send the screenshot.", reply_markup=build_payment_reply_kb())
             except Exception:
                 pass
             try:
-                bot.send_message(m.chat.id, "Send your UPI transaction id using:\n/verify_upi TXN_ID", reply_markup=build_payment_reply_kb())
+                send_upi_qr(m.chat.id, amount=amt, note=note)
             except Exception:
                 pass
             return
@@ -1167,7 +1383,7 @@ if bot:
                 pass
             return
         if "buy premium" in txt or "payment" in txt or txt == "premium" or "renew" in txt or "select a plan" in txt:
-            # Show plans as reply keyboard only (no visible message text)
+            # Show pricing then plans as reply keyboard
             try:
                 items = db.list_products(active_only=True)
             except Exception:
@@ -1175,6 +1391,10 @@ if bot:
             if not items:
                 cmd_premium(m)
                 return
+            try:
+                send_pricing_card(m.chat.id)
+            except Exception:
+                pass
             try:
                 _send_kb_quietly(m.chat.id, build_products_reply_kb())
             except Exception:
@@ -1540,7 +1760,7 @@ if bot:
         except Exception:
             pass
         if action == "verify_upi":
-            txt = "Send your UPI transaction id using:\n<code>/verify_upi TXN_ID</code>"
+            txt = "📷 Scan the UPI QR below to pay. After paying, tap '🧾 Upload Receipt' and send the screenshot."
         elif action == "verify_usdt":
             txt = "Send your USDT tx hash using:\n<code>/verify_usdt TX_HASH</code>"
         else:
@@ -1557,6 +1777,23 @@ if bot:
             bot.send_message(call.message.chat.id, txt, reply_markup=build_payment_reply_kb())
         except Exception:
             pass
+        # For UPI, also send QR with amount if available from latest order
+        if action == "verify_upi":
+            amt = None
+            note = None
+            try:
+                uid = call.from_user.id
+                urow = db.get_user_by_telegram_id(uid)
+                order = db.get_latest_pending_order_by_user_and_method(urow['id'], None) if urow else None
+                prod = db.get_product(order.get('product_id')) if order and order.get('product_id') else None
+                amt = prod.get('price_inr') if prod and prod.get('price_inr') is not None else None
+                note = f"{prod.get('name')} {prod.get('days')}d" if prod else None
+            except Exception:
+                pass
+            try:
+                send_upi_qr(call.message.chat.id, amount=amt, note=note)
+            except Exception:
+                pass
 
     @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("back:"))
     def on_back_click(call: types.CallbackQuery):

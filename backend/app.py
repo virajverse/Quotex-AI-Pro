@@ -910,6 +910,12 @@ if bot:
         kb.add(types.KeyboardButton("🏠 Main Menu"), types.KeyboardButton("👤 Profile"))
         return kb
 
+    def build_quick_assets_reply_kb():
+        kb = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+        kb.add(types.KeyboardButton("OTC FX"), types.KeyboardButton("LIVE FX"))
+        kb.add(types.KeyboardButton("🏠 Main Menu"), types.KeyboardButton("👤 Profile"))
+        return kb
+
     def build_upi_open_kb(upi_url: str):
         try:
             kb = types.InlineKeyboardMarkup(row_width=1)
@@ -1577,7 +1583,29 @@ if bot:
                     utils.send_safe(bot, m.chat.id, "🎟️ Free sample used for today. Upgrade to premium to continue.")
                     return
             try:
-                bot.send_message(m.chat.id, "Select market:", reply_markup=build_assets_kb())
+                bot.send_message(m.chat.id, "Choose category:", reply_markup=build_quick_assets_reply_kb())
+            except Exception:
+                pass
+            return
+
+        # Quick categories via reply keyboard
+        if txt == "otc fx":
+            try:
+                bot.send_message(m.chat.id, "Select OTC asset:", reply_markup=build_quick_assets_reply_kb())
+            except Exception:
+                pass
+            try:
+                bot.send_message(m.chat.id, "OTC FX", reply_markup=build_assets_list_kb("otc"))
+            except Exception:
+                pass
+            return
+        if txt == "live fx":
+            try:
+                bot.send_message(m.chat.id, "Select LIVE asset:", reply_markup=build_quick_assets_reply_kb())
+            except Exception:
+                pass
+            try:
+                bot.send_message(m.chat.id, "LIVE FX", reply_markup=build_assets_list_kb("live"))
             except Exception:
                 pass
             return
@@ -1822,6 +1850,10 @@ if bot:
             today = datetime.now(timezone.utc).date().isoformat()
             if _user_has_premium(user) or FREE_SAMPLES.get(uid) != today:
                 try:
+                    _send_kb_quietly(call.message.chat.id, build_quick_assets_reply_kb())
+                except Exception:
+                    pass
+                try:
                     bot.send_message(call.message.chat.id, "Select market:", reply_markup=build_assets_kb())
                 except Exception:
                     pass
@@ -1933,6 +1965,22 @@ if bot:
             pass
         try:
             bot.send_message(call.message.chat.id, "Select an asset:", reply_markup=build_assets_list_kb(cat))
+        except Exception:
+            pass
+
+    @bot.callback_query_handler(func=lambda c: c.data == "back:assets")
+    def on_assets_back(call: types.CallbackQuery):
+        try:
+            bot.answer_callback_query(call.id)
+        except Exception:
+            pass
+        # Show the reply keyboard under chat and the inline category picker again
+        try:
+            _send_kb_quietly(call.message.chat.id, build_quick_assets_reply_kb())
+        except Exception:
+            pass
+        try:
+            bot.send_message(call.message.chat.id, "Select market:", reply_markup=build_assets_kb())
         except Exception:
             pass
 

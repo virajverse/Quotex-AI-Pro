@@ -1,159 +1,191 @@
-# Telegram Premium Bot + Flask Admin API
+<div align="center">
+
+# Quotex AI Pro — Your Telegram Signals Bot + Neon Admin Panel ⚡🤖
+
+One bot. One panel. All signals. Delightfully simple payments and a neon-dark admin experience.
+
+[![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](#)
+[![Python](https://img.shields.io/badge/python-3.11+-3776AB.svg?logo=python&logoColor=white)](#)
+[![Flask](https://img.shields.io/badge/Flask-3.x-000000.svg?logo=flask)](#)
+[![Database](https://img.shields.io/badge/Database-SQLite-003B57.svg?logo=sqlite&logoColor=white)](#)
+[![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4.svg?logo=telegram&logoColor=white)](#)
+[![License](https://img.shields.io/badge/license-UNLICENSED-lightgrey.svg)](#license)
+
+</div>
+
+---
+
+## Table of Contents
+- [Overview](#overview)
+- [Screenshots / Demo](#screenshots--demo)
+- [Tech Stack](#tech-stack)
+- [Getting Started](#getting-started)
+- [Usage Examples](#usage-examples)
+- [Features](#features)
+- [Folder Structure](#folder-structure)
+- [Contributing](#contributing)
+- [License](#license)
+- [Contact](#contact)
+
+---
 
 ## Overview
-Single Flask web service with Telegram webhook and admin API. DB: Supabase Postgres via psycopg2. No background worker. Cron tasks run via `/api/cron`.
+Quotex AI Pro is a production-ready Telegram bot with a sleek neon-dark admin panel. It delivers trading signals, tracks usage, and streamlines payments.
 
-## Stack
-- Python 3.11, Flask 3.x, Flask-Cors
-- pyTelegramBotAPI (webhook)
-- psycopg2-binary, requests, python-dotenv
+- Built with Python + Flask and the official-style Telegram Bot API library.
+- Uses a simple, portable SQLite database (`bot.db`). No cloud DB needed.
+- Admins can review receipts (JPG/PNG/WebP/PDF), approve/reject, grant days/credits, and broadcast.
+- User-friendly payment flow for UPI (QR-only) and USDT.
 
-## Repo
-- `backend/app.py` Flask app + webhook + admin API
-- `backend/database.py` psycopg2 helpers
-- `backend/utils.py` logging, cron, verification
-- `supabase_schema.sql` Postgres schema
-- `railway.json` Railway deploy descriptor
-- `.env.example`, `requirements.txt`
+Why it’s different:
+- Focused signal UX for users. Minimal friction to subscribe, verify, and receive signals.
+- Neon analytics-style admin UI that feels modern and fast.
+- Zero DevOps: run locally or deploy anywhere that can run Flask.
 
-## Local Development (Windows + ngrok)
+---
 
-Follow these steps to run the Flask + Telegram bot locally and expose it to Telegram using ngrok.
+## Screenshots / Demo
+> Replace these placeholders with your actual screenshots or live demo links.
 
-1) Prerequisites
+| UI | Preview |
+| --- | --- |
+| Admin Dashboard | ![Dashboard](docs/screenshots/admin-dashboard.png) |
+| Verifications | ![Verifications](docs/screenshots/verifications.png) |
+| Telegram Bot | ![Bot Chat](docs/screenshots/bot-chat.png) |
+
+- Live demo: https://your-demo-url.example (optional)
+
+---
+
+## Tech Stack
+- ⚙️ Backend: ![Flask](https://img.shields.io/badge/Flask-3.x-000000?logo=flask) + ![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
+- 🤖 Bot: ![Telegram](https://img.shields.io/badge/pyTelegramBotAPI-4.x-26A5E4?logo=telegram&logoColor=white)
+- 🗄️ Database: ![SQLite](https://img.shields.io/badge/SQLite-embedded-003B57?logo=sqlite&logoColor=white)
+- 🧰 Utilities: ![Gunicorn](https://img.shields.io/badge/Gunicorn-21.x-499848) ![dotenv](https://img.shields.io/badge/dotenv-1.x-2B5F2F)
+
+---
+
+## Getting Started
+
+### 1) Prerequisites
 - Python 3.11+
-- Postgres database (Supabase recommended, or local Postgres)
-- ngrok installed and logged in
+- Telegram Bot token (from BotFather)
 
-2) Clone and environment
-- Copy env template:
-  - PowerShell: `Copy-Item .env.example .env`
-  - CMD: `copy .env.example .env`
-- Edit `.env` and set:
-  - `BOT_TOKEN` = your bot token from BotFather
-  - `ADMIN_API_KEY` = any strong string
-  - `SECRET_KEY` = any strong string
-  - `DATABASE_URL` =
-    - Supabase: use the connection string from Supabase (keeps `sslmode=require`)
-    - Local Postgres: `postgresql://user:pass@localhost:5432/dbname?sslmode=disable`
+### 2) Clone and configure env
+```bash
+git clone https://github.com/virajverse/Quotex-AI-Pro.git
+cd Quotex-AI-Pro
+```
+Copy environment file and edit values:
+```bash
+cp .env.example .env.local   # or copy manually on Windows
+```
+Key vars to set in `.env.local`:
+- `BOT_TOKEN` — Telegram bot token
+- `ADMIN_API_KEY` — Admin panel key (used for login and API)
+- `SECRET_KEY` — Flask session secret
+- Optional payments:
+  - `UPI_QR_FILE_ID` or `UPI_QR_IMAGE_URL` (QR-only flow)
+  - `USDT_TRC20_ADDRESS`, `EVM_ADDRESS`
 
-3) Install and run
-```powershell
+### 3) Install dependencies
+```bash
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+source .venv/bin/activate        # Windows: .\.venv\Scripts\Activate.ps1
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### 4) Run locally
+```bash
 python backend/app.py
-```
-The app listens on `http://127.0.0.1:5000` by default (`PORT` env can override).
-
-4) Start ngrok
-```powershell
-ngrok http 5000
-```
-Copy the HTTPS URL printed by ngrok, for example `https://abc123.ngrok.app`.
-
-5) Set webhook
-- Option A (automatic): put the URL in `.env` and restart the app
-  - `WEBHOOK_BASE_URL=https://abc123.ngrok.app`
-  - Restart: `python backend/app.py`
-- Option B (manual): call Telegram API
-```powershell
-$env:BOT_TOKEN="<your-bot-token>"
-$env:WEBHOOK_BASE_URL="https://abc123.ngrok.app"
-curl -s "https://api.telegram.org/bot$env:BOT_TOKEN/setWebhook?url=$env:WEBHOOK_BASE_URL/bot/$env:BOT_TOKEN&drop_pending_updates=true"
+# App on http://127.0.0.1:5000
 ```
 
-6) Test
-- Health: open `http://127.0.0.1:5000/health`
-- Send `/start` to your bot in Telegram. You should get a welcome message.
-- Admin panel: `http://127.0.0.1:5000/admin/login` (login with `ADMIN_API_KEY`)
-
-7) Database
-- Apply schema once to your Postgres:
-```powershell
-psql "<DATABASE_URL>" -f supabase_schema.sql
-```
-
-Tips
-- If ngrok URL changes, update `WEBHOOK_BASE_URL` and set webhook again, or restart the app with the new value.
-- If using local Postgres, ensure `sslmode=disable` is present in `DATABASE_URL` to avoid SSL errors.
-
-## Setup
-1. Create Supabase Postgres. Run `supabase_schema.sql` in SQL editor.
-2. In Railway project settings, add environment variables from `.env.example`:
-   - Required: `DATABASE_URL`, `BOT_TOKEN`, `ADMIN_API_KEY`, `SECRET_KEY`, `WEBHOOK_BASE_URL=https://<your-railway-domain>` once deployed.
-   - Optional: UPI/USDT identifiers and scanner API keys for auto-verification.
-3. Deploy to Railway:
-   - Create a new Railway project and select **Deploy from GitHub Repo**.
-   - Ensure `railway.json` is detected (Nixpacks builder installs `requirements.txt`).
-   - After first deploy, note the public URL (e.g. `https://your-service.up.railway.app`) and update `WEBHOOK_BASE_URL` accordingly, then redeploy.
-
-## Webhook
-- URL: `https://<your-railway-domain>/bot/<BOT_TOKEN>`
-- Set it after `WEBHOOK_BASE_URL` is configured (the app attempts to set automatically on boot):
-```
+### 5) Webhook (optional for public hosting)
+Set your public base URL (ngrok/Render/VPS) and restart the app, or set manually:
+```bash
 curl -s "https://api.telegram.org/bot$BOT_TOKEN/setWebhook?url=$WEBHOOK_BASE_URL/bot/$BOT_TOKEN&drop_pending_updates=true"
 ```
 
-## Cron
-- Railway Scheduled Jobs or external monitors (e.g. UptimeRobot) should POST:
-  - URL: `https://<your-railway-domain>/api/cron`
-  - Header: `x-admin-key: <ADMIN_API_KEY>`
-  - Suggested cadence: every 12h.
-  - Railway job example command:
-    ```
-    curl -X POST -H "x-admin-key: $ADMIN_API_KEY" "$WEBHOOK_BASE_URL/api/cron"
-    ```
+---
 
-## API
-- Health:
-  - `GET /health`
-  - `GET /health/db`
-- Admin (header `x-admin-key: ADMIN_API_KEY`):
-  - `GET /api/stats`
-  - `GET /api/users?q=...`
-  - `POST /api/grant` `{ident, days}`
-  - `POST /api/revoke` `{ident}`
-  - `POST /api/message` `{ident, text}`
-  - `POST /api/broadcast` `{text, premium_only?}`
-  - `POST /api/cron` `{}`
+## Usage Examples
 
-## Admin Panel
-- Routes:
-  - `GET /admin/login` → login with `ADMIN_API_KEY`
-  - `GET /admin/` → dashboard (stats, run cron)
-  - `GET /admin/users?q=...` → search users, grant/revoke/message
-  - `GET/POST /admin/broadcast` → send broadcast (optionally premium-only)
-  - `GET /admin/logout`
-- Setup:
-  - Set `SECRET_KEY` for Flask session signing.
-  - Admin login uses the same `ADMIN_API_KEY`.
-
-## Curl examples
+### Telegram commands
+```text
+/start            # Register / update profile
+/premium          # Plans and payment options
+/verify_upi ...   # Submit UPI txn id (if you use that flow)
+/verify_usdt ...  # Submit USDT tx hash
 ```
+
+### Admin panel
+- Login: `http://127.0.0.1:5000/admin/login` (use `ADMIN_API_KEY`)
+- Review verifications, click “View” to open receipts inline (images/PDF), Approve/Reject
+- Broadcast messages to all or premium users
+
+### REST examples
+```bash
 # Stats
-curl -H "x-admin-key: $ADMIN_API_KEY" https://<host>/api/stats
+curl -H "x-admin-key: $ADMIN_API_KEY" http://127.0.0.1:5000/api/stats
 
-# Search
-curl -H "x-admin-key: $ADMIN_API_KEY" "https://<host>/api/users?q=@username"
-
-# Grant 30d
-curl -X POST -H "Content-Type: application/json" -H "x-admin-key: $ADMIN_API_KEY" \
-  -d '{"ident":"@username","days":30}' https://<host>/api/grant
-
-# Cron
-curl -X POST -H "x-admin-key: $ADMIN_API_KEY" https://<host>/api/cron
+# Search users
+curl -H "x-admin-key: $ADMIN_API_KEY" "http://127.0.0.1:5000/api/users?q=@username"
 ```
 
-## Telegram usage
-- `/start` register/update user
-- `/status` premium status
-- `/premium` payment info
-- `/verify_upi <txn_id>`
-- `/verify_usdt <tx_hash>`
+---
 
-## Notes
-- DB SSL required via `sslmode=require`.
-- CORS allowed via `FRONTEND_ORIGIN`.
-- Secrets are not logged.
+## Features
+- ✔️ Neon-dark, analytics-style admin panel UI
+- ✔️ QR-only UPI flow (no deep links)
+- ✔️ Receipt review: JPG/PNG/WebP/PDF inline preview
+- ✔️ Credit + daily limit tracking for signals
+- ✔️ Broadcast to all or premium users
+- ✔️ Simple SQLite — portable and zero-config
+- ✔️ Typing indicators for heavy operations
+
+---
+
+## Folder Structure
+```text
+.
+├─ backend/
+│  ├─ app.py                # Flask app + Telegram handlers + Admin routes
+│  ├─ utils.py              # Logging, signal formatting, helpers
+│  ├─ sqlite_db.py          # SQLite models and queries
+│  ├─ templates/
+│  │  └─ admin/             # Admin HTML templates
+│  └─ assets/               # Static assets (if any)
+├─ .env.example             # Env template
+├─ .env.local               # Local overrides (gitignored)
+├─ requirements.txt         # Python deps
+├─ bot.db                   # SQLite database (runtime)
+└─ README.md
+```
+
+---
+
+## Contributing
+Contributions are welcome! To propose changes:
+1. Fork the repo and create a feature branch.
+2. Follow existing code style. Keep changes small and focused.
+3. Add screenshots for UI changes (admin/panels).
+4. Open a pull request with a clear description and testing notes.
+
+---
+
+## License
+[![License](https://img.shields.io/badge/license-UNLICENSED-lightgrey.svg)](#)
+
+This repository currently does not include an OSS license. All rights reserved. Contact the author for commercial use.
+
+---
+
+## Contact
+- **GitHub**: https://github.com/virajverse
+- **LinkedIn**: https://www.linkedin.com/in/ (add your handle)
+- **Website**: https://your-website.example
+
+If you ship with this template, drop a star ⭐ and share feedback — it helps a ton!

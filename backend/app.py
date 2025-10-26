@@ -1,6 +1,8 @@
 import os
 import logging
 import threading
+import mimetypes
+import imghdr
 from datetime import datetime, timezone, timedelta
 from functools import wraps
 
@@ -277,6 +279,88 @@ def admin_verification_detail(vid: int):
     except Exception:
         pass
     return render_template("admin/verification_detail.html", v=v, user=user, order=order, product=product)
+
+@app.get("/admin/verification/<int:vid>/receipt")
+@ui_login_required
+def admin_verification_receipt(vid: int):
+    v = db.get_verification(vid)
+    if not v:
+        return "Not found", 404
+    file_id = None
+    # Prefer order attachment
+    try:
+        if v.get("order_id"):
+            order = db.get_order(v.get("order_id"))
+            if order and order.get("receipt_file_id"):
+                file_id = order.get("receipt_file_id")
+    except Exception:
+        pass
+    # Fallback: parse from verification.request_data
+    if not file_id:
+        raw = v.get("request_data")
+        if raw:
+            try:
+                data = json.loads(raw) if isinstance(raw, str) else raw
+                if isinstance(data, dict):
+                    file_id = data.get("file_id")
+            except Exception:
+                pass
+    # Final fallback: latest user receipt
+    if not file_id:
+        try:
+            file_id = db.get_latest_user_receipt_file_id(v.get("user_id"))
+        except Exception:
+            file_id = None
+    if not file_id:
+        return "Receipt not found", 404
+    if not bot:
+        return "Bot unavailable", 503
+    try:
+        f = bot.get_file(file_id)
+        data = bot.download_file(f.file_path)
+        # Guess mime from file path extension
+        p = (getattr(f, 'file_path', '') or '')
+        filename = os.path.basename(p) or 'receipt'
+        guessed, _ = mimetypes.guess_type(filename)
+        mime = guessed or 'application/octet-stream'
+        # If unknown, try detect by content for PDF/images
+        if mime == 'application/octet-stream' or not mime:
+            head = data[:16] if isinstance(data, (bytes, bytearray)) else b''
+            try:
+                if head.startswith(b'%PDF'):
+                    mime = 'application/pdf'
+                else:
+                    img_kind = imghdr.what(None, h=data)
+                    if img_kind:
+                        mapping = {
+                            'jpeg': 'image/jpeg',
+                            'png': 'image/png',
+                            'gif': 'image/gif',
+                            'tiff': 'image/tiff',
+                            'bmp': 'image/bmp',
+                            'rgb': 'image/x-rgb',
+                            'pbm': 'image/x-portable-bitmap',
+                            'pgm': 'image/x-portable-graymap',
+                            'ppm': 'image/x-portable-pixmap',
+                            'rast': 'image/cmu-raster',
+                            'xbm': 'image/x-xbitmap',
+                        }
+                        mime = mapping.get(img_kind, mime)
+                    # crude WEBP check
+                    elif head[:4] == b'RIFF' and (data[8:12] if len(data) >= 12 else b'') == b'WEBP':
+                        mime = 'image/webp'
+            except Exception:
+                pass
+        resp = send_file(io.BytesIO(data), mimetype=mime)
+        try:
+            disp = 'inline'
+            resp.headers['Content-Disposition'] = f"{disp}; filename=\"{filename}\""
+        except Exception:
+            pass
+        return resp
+    except Exception:
+        logger.exception("Failed to fetch receipt file")
+        return "Failed to fetch receipt", 500
 
 
 @app.post("/admin/verification/<int:vid>/approve")

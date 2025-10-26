@@ -59,6 +59,9 @@
         <td class="muted">{{ v.created_at }}</td>
         <td>{{ v.order_id or '' }}</td>
         <td>
+          {% if v.method=='receipt' %}
+            <a class="btn" href="/admin/verification/{{v.id}}/receipt" target="_blank">View</a>
+          {% endif %}
           <form class="inline" method="post" action="/admin/verification/{{v.id}}/approve">
             <input name="days" placeholder="days" value="30" style="max-width:80px">
             <button class="btn ok" type="submit">Approve</button>

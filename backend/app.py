@@ -544,6 +544,7 @@ if bot:
             telebot.types.BotCommand("signal", "Get live signals"),
             telebot.types.BotCommand("hours", "Market hours"),
             telebot.types.BotCommand("status", "Premium status"),
+            telebot.types.BotCommand("pricing", "View pricing plans"),
             telebot.types.BotCommand("premium", "Payment options"),
             telebot.types.BotCommand("help", "Help"),
         ])
@@ -1059,7 +1060,18 @@ if bot:
 
     @bot.message_handler(commands=["help"])
     def cmd_help(m: types.Message):
-        utils.send_safe(bot, m.chat.id, "Commands:\n/id\n/status\n/premium\n/menu\n/signal\n/hours\n/verify_upi <txn_id>\n/verify_usdt <tx_hash>")
+        utils.send_safe(bot, m.chat.id, "Commands:\n/id\n/status\n/pricing\n/premium\n/menu\n/signal\n/hours\n/verify_upi <txn_id>\n/verify_usdt <tx_hash>")
+
+    @bot.message_handler(commands=["pricing"])
+    def cmd_pricing(m: types.Message):
+        try:
+            send_pricing_card(m.chat.id)
+        except Exception as e:
+            logger.exception("Failed to send pricing")
+            try:
+                bot.send_message(m.chat.id, pricing_message())
+            except Exception:
+                pass
 
     @bot.message_handler(commands=["menu"])
     def cmd_menu(m: types.Message):

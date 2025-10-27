@@ -583,6 +583,14 @@ def get_entry_price(pair: str, timeframe: str) -> Optional[float]:
             return float(closes[-1])
     except Exception:
         pass
+    # 5) Free FX spot fallback (no key required)
+    if cls == "forex":
+        try:
+            spot = fetch_fx_spot_free(pair)
+            if spot is not None:
+                return float(spot)
+        except Exception:
+            pass
     return None
 
 def _seconds_for_tf(tf: str) -> int:
@@ -997,13 +1005,62 @@ def generate_smart_signal(asset: Optional[str] = None, timeframe: str = "5m") ->
     base = 2.0 + min(3.0, gap * 2.0)  # 2..5
     confidence = int(round(base))
 
+    sess_names = _sessions_active_now_ist()
+    win_txt = _pair_window_text(pair)
     return (
-        f"{pair}\n"
+        f"{pair} · TF: {timeframe}\n"
         f"{emoji} Direction: {direction}\n"
         f"💡 Confidence: {confidence}/5\n"
         f"Reason: {reason_text}.\n"
+        f"Session: {sess_names} · Active window: {win_txt}\n"
         f"⚠️ This is not financial advice."
     )
+
+def _sessions_active_now_ist() -> str:
+    now_ist = datetime.now(timezone.utc).astimezone(IST_TZ)
+    def in_window(st: time, en: time) -> bool:
+        t = now_ist.time()
+        return (st <= t < en) if st <= en else (t >= st or t < en)
+    active = [name for (name, st, en, _p) in SESSIONS_IST if in_window(st, en)]
+    return " / ".join(active) if active else "-"
+
+def _pair_window_text(pair: str) -> str:
+    p = (pair or "").upper()
+    w = FX_PAIR_WINDOWS_IST.get(p)
+    if not w:
+        return "-"
+    def fmt(ti: time) -> str:
+        base = datetime.now(IST_TZ).replace(hour=ti.hour, minute=ti.minute, second=0, microsecond=0)
+        return base.strftime("%I:%M %p")
+    return f"{fmt(w[0])}–{fmt(w[1])} IST"
+
+def fetch_fx_spot_free(pair: str) -> Optional[float]:
+    try:
+        base, quote = (pair or "").upper().split("/")
+    except Exception:
+        return None
+    # Try Frankfurter API
+    try:
+        r = safe_request("GET", f"https://api.frankfurter.app/latest?from={base}&to={quote}", timeout=6)
+        if r and r.status_code == 200:
+            j = r.json() or {}
+            rates = j.get("rates") or {}
+            val = rates.get(quote)
+            if isinstance(val, (int, float)):
+                return float(val)
+    except Exception:
+        pass
+    # Fallback: exchangerate.host
+    try:
+        r = safe_request("GET", f"https://api.exchangerate.host/convert?from={base}&to={quote}", timeout=6)
+        if r and r.status_code == 200:
+            j = r.json() or {}
+            val = j.get("result")
+            if isinstance(val, (int, float)):
+                return float(val)
+    except Exception:
+        pass
+    return None
 
 
 # ---------- Live data adapters ----------
@@ -1253,12 +1310,12 @@ def _force_signal_from_tf(pair: str) -> Optional[Dict[str, Any]]:
     return None
 
 def generate_ensemble_signal(asset: Optional[str] = None, timeframe: str = "5m") -> str:
-    assets = ["BTC/USDT", "ETH/USDT", "EUR/USD", "GBP/JPY", "GOLD", "NASDAQ"]
+    assets = ["EUR/USD", "USD/JPY", "GBP/USD", "AUD/USD", "USD/CHF", "USD/CAD", "NZD/USD"]
     pair = asset or random.choice(assets)
     # Session filter (toggle via STRICT_SESSION_FILTER)
     if os.getenv("STRICT_SESSION_FILTER", "1").strip() in ("1", "true", "True") and not _market_open_for_asset(pair):
         return (
-            f"{pair}\n"
+            f"{pair} · TF: {timeframe}\n"
             f"⏳ Direction: NO-TRADE\n"
             f"💡 Confidence: 0/5\n"
             f"Reason: Session closed/illiquid.\n"
@@ -1267,7 +1324,7 @@ def generate_ensemble_signal(asset: Optional[str] = None, timeframe: str = "5m")
     # News risk filter
     if _news_risk_window(pair):
         return (
-            f"{pair}\n"
+            f"{pair} · TF: {timeframe}\n"
             f"⏳ Direction: NO-TRADE\n"
             f"💡 Confidence: 0/5\n"
             f"Reason: High-impact news window.\n"
@@ -1283,11 +1340,14 @@ def generate_ensemble_signal(asset: Optional[str] = None, timeframe: str = "5m")
             confidence = int(forced.get("confidence", 3))
             reasons = forced.get("reasons", [])
             reason_text = ", ".join(reasons) if reasons else ("Single-TF bias (EMA+MACD+RSI)")
+            sess_names = _sessions_active_now_ist()
+            win_txt = _pair_window_text(pair)
             return (
-                f"{pair}\n"
+                f"{pair} · TF: {timeframe}\n"
                 f"{emoji} Direction: {direction}\n"
                 f"💡 Confidence: {confidence}/5\n"
                 f"Reason: {reason_text}.\n"
+                f"Session: {sess_names} · Active window: {win_txt}\n"
                 f"⚠️ This is not financial advice."
             )
         # Absolute fallback
@@ -1295,11 +1355,14 @@ def generate_ensemble_signal(asset: Optional[str] = None, timeframe: str = "5m")
         emoji = "📈"
         confidence = 2
         reason_text = "Fallback bias"
+        sess_names = _sessions_active_now_ist()
+        win_txt = _pair_window_text(pair)
         return (
-            f"{pair}\n"
+            f"{pair} · TF: {timeframe}\n"
             f"{emoji} Direction: {direction}\n"
             f"💡 Confidence: {confidence}/5\n"
             f"Reason: {reason_text}.\n"
+            f"Session: {sess_names} · Active window: {win_txt}\n"
             f"⚠️ This is not financial advice."
         )
     direction = agg["dir"]
@@ -1307,11 +1370,14 @@ def generate_ensemble_signal(asset: Optional[str] = None, timeframe: str = "5m")
     confidence = int(agg.get("confidence", 3))
     reasons = agg.get("reasons", [])
     reason_text = ", ".join(reasons) if reasons else ("MTF EMA+MACD+RSI confluence" if direction=="UP" else "MTF EMA+MACD+RSI pressure")
+    sess_names = _sessions_active_now_ist()
+    win_txt = _pair_window_text(pair)
     return (
-        f"{pair}\n"
+        f"{pair} · TF: {timeframe}\n"
         f"{emoji} Direction: {direction}\n"
         f"💡 Confidence: {confidence}/5\n"
         f"Reason: {reason_text}.\n"
+        f"Session: {sess_names} · Active window: {win_txt}\n"
         f"⚠️ This is not financial advice."
     )
 

@@ -2200,14 +2200,18 @@ if bot:
                     stop_loading_tf()
                 except Exception:
                     pass
+            _src = quota.get('source')
+            _src_label = 'Daily plan' if _src == 'daily' else ('Credit pack' if _src == 'credit' else 'Free sample')
+            _left = max(quota.get('daily_limit',0)-quota.get('used_today',0),0)
+            _credits = quota.get('credits',0)
             footer = (
-                f"\nRemaining today: {max(quota.get('daily_limit',0)-quota.get('used_today',0),0)} · "
-                f"Credits: {quota.get('credits',0)} ({'daily' if quota.get('source')=='daily' else ('credit' if quota.get('source')=='credit' else 'free')} used)"
+                "\n— Account —\n"
+                f"• Daily signals left: {_left}\n"
+                f"• Credit balance: {_credits}\n"
+                f"• Access type: {_src_label}"
             )
             try:
-                # Send immediately without waiting for price
-                base_msg = bot.send_message(m.chat.id, text + "\n" + footer, reply_markup=build_timeframes_reply_kb())
-                direction = utils.direction_from_signal_text(text) or ""
+                # Compute entry price now and include in base message
                 def _fmt(v):
                     if v is None:
                         return "-"
@@ -2215,6 +2219,22 @@ if bot:
                     if v >= 100: return f"{v:.2f}"
                     if v >= 1: return f"{v:.4f}"
                     return f"{v:.6f}"
+                entry_price_now = None
+                try:
+                    entry_price_now = utils.get_entry_price(pair, txt)
+                    if entry_price_now is None:
+                        for alt in ("1m", "5m", "3m"):
+                            ep = utils.get_entry_price(pair, alt)
+                            if ep is not None:
+                                entry_price_now = ep
+                                break
+                    if entry_price_now is None:
+                        entry_price_now = utils.get_close_at_time(pair, txt, datetime.now(timezone.utc).isoformat())
+                except Exception:
+                    entry_price_now = None
+                base_text = text + f"\nEntry price: <code>{_fmt(entry_price_now)}</code>" + "\n" + footer
+                base_msg = bot.send_message(m.chat.id, base_text, reply_markup=build_timeframes_reply_kb())
+                direction = utils.direction_from_signal_text(text) or ""
                 def _after_send():
                     try:
                         entry_time_iso = datetime.now(timezone.utc).isoformat()
@@ -2232,12 +2252,6 @@ if bot:
                                 entry_price = utils.get_close_at_time(pair, txt, entry_time_iso)
                             except Exception:
                                 entry_price = None
-                        # Post a follow-up line with entry price
-                        if direction in ("UP", "DOWN"):
-                            details = f"Entry price: <code>{_fmt(entry_price)}</code> (update in {txt})"
-                        else:
-                            details = f"Entry price: <code>{_fmt(entry_price)}</code>"
-                        details_msg = bot.send_message(m.chat.id, details)
                         # Log served signal
                         try:
                             urow = db.get_user_by_telegram_id(uid) or (
@@ -2255,19 +2269,6 @@ if bot:
                                     source=quota.get('source'),
                                     message_id=getattr(base_msg, 'message_id', None),
                                     raw_text=text,
-                                    entry_time=entry_time_iso
-                                )
-                                # Log details line as separate message so admin delete can remove it
-                                db.insert_signal_log(
-                                    user_id=urow.get('id'),
-                                    telegram_id=uid,
-                                    pair=pair,
-                                    timeframe=txt,
-                                    direction=direction,
-                                    entry_price=entry_price,
-                                    source='details',
-                                    message_id=getattr(details_msg, 'message_id', None),
-                                    raw_text=details,
                                     entry_time=entry_time_iso
                                 )
                         except Exception:
@@ -2637,25 +2638,45 @@ if bot:
                 stop_loading_tf()
             except Exception:
                 pass
+        _src = quota.get('source')
+        _src_label = 'Daily plan' if _src == 'daily' else ('Credit pack' if _src == 'credit' else 'Free sample')
+        _left = max(quota.get('daily_limit',0)-quota.get('used_today',0),0)
+        _credits = quota.get('credits',0)
         footer = (
-            f"\nRemaining today: {max(quota.get('daily_limit',0)-quota.get('used_today',0),0)} · "
-            f"Credits: {quota.get('credits',0)} ({'daily' if quota.get('source')=='daily' else ('credit' if quota.get('source')=='credit' else 'free')} used)"
+            "\n— Account —\n"
+            f"• Daily signals left: {_left}\n"
+            f"• Credit balance: {_credits}\n"
+            f"• Access type: {_src_label}"
         )
+        # Prepare entry price now and include in base message
+        def _fmt2(v):
+            if v is None:
+                return "-"
+            v = float(v)
+            if v >= 100: return f"{v:.2f}"
+            if v >= 1: return f"{v:.4f}"
+            return f"{v:.6f}"
+        entry_price_now = None
+        try:
+            entry_price_now = utils.get_entry_price(pair, tf)
+            if entry_price_now is None:
+                for alt in ("1m", "5m", "3m"):
+                    entry_price_now = utils.get_entry_price(pair, alt)
+                    if entry_price_now is not None:
+                        break
+            if entry_price_now is None:
+                entry_price_now = utils.get_close_at_time(pair, tf, datetime.now(timezone.utc).isoformat())
+        except Exception:
+            entry_price_now = None
+        base_text = text + f"\nEntry price: <code>{_fmt2(entry_price_now)}</code>" + "\n" + footer
         # Send base signal immediately
         try:
             bot.answer_callback_query(call.id)
         except Exception:
             pass
         try:
-            base_msg = bot.send_message(call.message.chat.id, text + "\n" + footer, reply_markup=build_signal_nav_kb(asset_code))
+            base_msg = bot.send_message(call.message.chat.id, base_text, reply_markup=build_signal_nav_kb(asset_code))
             direction = utils.direction_from_signal_text(text) or ""
-            def _fmt2(v):
-                if v is None:
-                    return "-"
-                v = float(v)
-                if v >= 100: return f"{v:.2f}"
-                if v >= 1: return f"{v:.4f}"
-                return f"{v:.6f}"
             def _after_send2():
                 try:
                     entry_time_iso = datetime.now(timezone.utc).isoformat()
@@ -2673,12 +2694,6 @@ if bot:
                             entry_price = utils.get_close_at_time(pair, tf, entry_time_iso)
                         except Exception:
                             entry_price = None
-                    # Follow-up message for entry
-                    if direction in ("UP", "DOWN"):
-                        details = f"Entry price: <code>{_fmt2(entry_price)}</code> (update in {tf})"
-                    else:
-                        details = f"Entry price: <code>{_fmt2(entry_price)}</code>"
-                    details_msg2 = bot.send_message(call.message.chat.id, details)
                     # Log served signal
                     try:
                         urow = db.get_user_by_telegram_id(uid) or (
@@ -2696,19 +2711,6 @@ if bot:
                                 source=quota.get('source'),
                                 message_id=getattr(base_msg, 'message_id', None),
                                 raw_text=text,
-                                entry_time=entry_time_iso
-                            )
-                            # Log details line as separate message
-                            db.insert_signal_log(
-                                user_id=urow.get('id'),
-                                telegram_id=uid,
-                                pair=pair,
-                                timeframe=tf,
-                                direction=direction,
-                                entry_price=entry_price,
-                                source='details',
-                                message_id=getattr(details_msg2, 'message_id', None),
-                                raw_text=details,
                                 entry_time=entry_time_iso
                             )
                     except Exception:

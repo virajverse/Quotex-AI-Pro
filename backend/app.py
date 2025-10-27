@@ -68,6 +68,8 @@ SIGNALS_PER_DAY = int(os.getenv("SIGNALS_PER_DAY", "20"))
 SIGNAL_CONFIDENCE_MIN = int(os.getenv("SIGNAL_CONFIDENCE_MIN", "5"))  # 1..5; 5 ~ highest
 BROADCAST_INTERVAL_SEC = int(os.getenv("BROADCAST_INTERVAL_SEC", "120"))
 BROADCAST_ASSETS = [p.strip() for p in (os.getenv("BROADCAST_ASSETS", "EUR/USD,GBP/JPY,GBP/USD,EUR/GBP,USD/JPY").split(",")) if p.strip()]
+EVALUATION_INTERVAL_SEC = int(os.getenv("EVALUATION_INTERVAL_SEC", "60"))
+EVALUATION_ENABLED = os.getenv("EVALUATION_ENABLED", "1").strip() in ("1", "true", "True")
 
 # Session secret key for Admin Panel
 if SECRET_KEY:
@@ -1373,36 +1375,46 @@ if bot:
         time.sleep(5)
         while True:
             try:
-                # Reset daily counter automatically by key change
+                # Respect daily cap
                 if _daily_count() >= max(0, SIGNALS_PER_DAY):
-                    time.sleep(300)
+                    time.sleep(max(30, int(os.getenv("BROADCAST_INTERVAL_SEC", str(BROADCAST_INTERVAL_SEC)))))
                     continue
-                # Choose candidate pairs
-                pairs = [p for p in BROADCAST_ASSETS if "/" in p]
-                random.shuffle(pairs)
-                sent = False
-                for pair in pairs:
-                    info = _is_high_conf(pair)
-                    if not info:
-                        continue
-                    text = _build_channel_signal(pair, info)
-                    try:
-                        bot.send_message(tgt, text)
-                        _bump_daily_count()
-                        sent = True
-                        break
-                    except Exception:
-                        # If channel post fails, stop trying this cycle
-                        break
-                # Sleep between attempts
-                time.sleep(max(30, BROADCAST_INTERVAL_SEC if sent else BROADCAST_INTERVAL_SEC // 2))
+                # Minute tick pacing over configured assets
+                for p in BROADCAST_ASSETS:
+                    info = _is_high_conf(p)
+                    if info:
+                        msg = _build_channel_signal(p, info)
+                        try:
+                            bot.send_message(tgt, msg)
+                            _bump_daily_count()
+                        except Exception:
+                            pass
+                time.sleep(max(30, int(os.getenv("BROADCAST_INTERVAL_SEC", str(BROADCAST_INTERVAL_SEC)))))
             except Exception:
                 time.sleep(60)
+
+    def _evaluation_daemon():
+        if not bot:
+            return
+        # Small delay to let app settle
+        time.sleep(5)
+        while True:
+            try:
+                utils.evaluate_pending_signals(db)
+            except Exception:
+                pass
+            time.sleep(max(15, int(os.getenv("EVALUATION_INTERVAL_SEC", str(EVALUATION_INTERVAL_SEC)))))
 
     # Start broadcaster if configured
     if SIGNAL_CHANNEL:
         try:
             threading.Thread(target=_channel_broadcaster, name="channel-broadcaster", daemon=True).start()
+        except Exception:
+            pass
+    # Start evaluation daemon to clear PENDING logs
+    if EVALUATION_ENABLED:
+        try:
+            threading.Thread(target=_evaluation_daemon, name="signal-evaluator", daemon=True).start()
         except Exception:
             pass
 

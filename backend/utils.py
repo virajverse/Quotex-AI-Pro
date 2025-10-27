@@ -168,8 +168,16 @@ def evaluate_pending_signals(db, max_batch: int = 200) -> int:
             if cls == "crypto":
                 ev = _eval_option_a_crypto(pair, tf, entry_time, direction)
             else:
-                if os.getenv("FINNHUB_API_KEY", "").strip():
-                    ev = _eval_option_a_finnhub(pair, tf, entry_time, direction)
+                try:
+                    if os.getenv("FINNHUB_API_KEY", "").strip():
+                        ev = _eval_option_a_finnhub(pair, tf, entry_time, direction)
+                except Exception:
+                    ev = None
+                if not ev:
+                    try:
+                        ev = _eval_option_a_yahoo_fx(pair, tf, entry_time, direction)
+                    except Exception:
+                        ev = None
         except Exception:
             ev = None
         if not ev or ev.get("exit_price") is None:
@@ -578,6 +586,45 @@ def _eval_option_a_crypto(pair: str, timeframe: str, entry_iso: str, direction: 
     sign = 1.0 if direction == "UP" else -1.0
     pnl = (exit_price - entry_price) / entry_price * 100.0 * sign
     exit_iso = datetime.fromtimestamp(int(kl[exit_idx][6]) / 1000.0, tz=timezone.utc).isoformat()
+    return {"entry_price": entry_price, "exit_price": exit_price, "pnl_pct": pnl, "exit_time": exit_iso, "outcome": ("WIN" if pnl > 0 else "LOSS")}
+
+def _eval_option_a_yahoo_fx(pair: str, timeframe: str, entry_iso: str, direction: str) -> Optional[Dict[str, Any]]:
+    if timeframe == "5m":
+        interval = "5m"; rng = "1d"
+    else:
+        interval = "1m"; rng = "1h"
+    kl = fetch_klines_yahoo_fx(pair, interval=interval, range_s=rng)
+    if not kl:
+        return None
+    try:
+        from datetime import datetime
+        entry_dt = datetime.fromisoformat(entry_iso.replace("Z", "+00:00"))
+        entry_ms = int(entry_dt.timestamp() * 1000)
+    except Exception:
+        return None
+    idx = None
+    for i, k in enumerate(kl):
+        ot, ct = int(k[0]), int(k[6])
+        if ot <= entry_ms < ct:
+            idx = i; break
+        if entry_ms <= ot:
+            idx = i; break
+    if idx is None:
+        return None
+    sec = _seconds_for_tf(timeframe)
+    if sec <= 0:
+        return None
+    exit_due = int(kl[idx][0]) + 5 * sec * 1000
+    j = idx
+    while j < len(kl) and int(kl[j][6]) < exit_due:
+        j += 1
+    if j >= len(kl):
+        return None
+    entry_price = float(kl[idx][4])
+    exit_price = float(kl[j][4])
+    sign = 1.0 if direction == "UP" else -1.0
+    pnl = (exit_price - entry_price) / entry_price * 100.0 * sign
+    exit_iso = datetime.fromtimestamp(int(kl[j][6]) / 1000.0, tz=timezone.utc).isoformat()
     return {"entry_price": entry_price, "exit_price": exit_price, "pnl_pct": pnl, "exit_time": exit_iso, "outcome": ("WIN" if pnl > 0 else "LOSS")}
 
 def _eval_option_a_finnhub(pair: str, timeframe: str, entry_iso: str, direction: str) -> Optional[Dict[str, Any]]:

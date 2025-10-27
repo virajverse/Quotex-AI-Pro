@@ -42,6 +42,8 @@ try:
         db.init_db()
     if hasattr(db, 'ensure_default_products'):
         db.ensure_default_products()
+    if hasattr(db, 'ensure_credit_product'):
+        db.ensure_credit_product()
 except Exception:
     pass
 
@@ -615,19 +617,28 @@ def admin_verification_approve(vid: int):
     if not user:
         flash("User not found", "danger")
         return redirect(url_for("admin_verifications"))
-    # if order linked and no days specified, use product days
-    if days <= 0 and v.get("order_id") and hasattr(db, "get_order") and hasattr(db, "get_product"):
+    # if order linked, derive handling from product
+    credit_only = False
+    prod = None
+    if v.get("order_id") and hasattr(db, "get_order") and hasattr(db, "get_product"):
         try:
             order = db.get_order(v.get("order_id"))
             prod = db.get_product(order.get("product_id")) if order else None
-            if prod and prod.get("days"):
-                days = int(prod.get("days"))
+            if prod:
+                pd = int(prod.get("days") or 0)
+                credit_only = (pd <= 0)
+                if days <= 0 and pd > 0:
+                    days = pd
         except Exception:
             pass
-    if days <= 0:
+    # Default days only when not a credit-only approval
+    if days <= 0 and not credit_only:
         days = 30
     try:
-        new_exp = db.grant_premium_by_user_id(user["id"], days)
+        new_exp = db.grant_premium_by_user_id(user["id"], days) if days > 0 else _user_expiry(user)
+        # Auto-assign 1 credit for credit-only approvals when admin left credits blank
+        if credit_only and credits == 0:
+            credits = 1
         if credits != 0:
             try:
                 db.add_signal_credits_by_user_id(user["id"], credits)
@@ -642,10 +653,13 @@ def admin_verification_approve(vid: int):
             db.set_verification_status(vid, "approved", notes=f"Approved {days}d; credits {credits}")
         db.log_admin("verification_approve", {"verification_id": vid, "user_id": user["id"], "days": days, "credits": credits}, performed_by="panel")
         if bot:
-            parts = [f"Premium +{days}d. New expiry: <b>{utils.format_ts_iso(new_exp)}</b>"]
+            parts = []
+            if days > 0:
+                parts.append(f"Premium +{days}d. New expiry: <b>{utils.format_ts_iso(new_exp)}</b>")
             if credits != 0:
                 parts.append(f"Signal credits {'+' if credits>0 else ''}{credits}")
-            utils.send_safe(bot, user["telegram_id"], "✅ Payment approved. " + " \u2022 ".join(parts))
+            msg = "✅ Payment approved. " + (" • ".join(parts) if parts else "")
+            utils.send_safe(bot, user["telegram_id"], msg)
         flash("Verification approved and premium granted", "success")
     except Exception:
         logger.exception("approve failed")
@@ -1029,7 +1043,8 @@ if bot:
         except Exception:
             items = []
         for p in items or []:
-            label = f"{p.get('name')} — {p.get('days')}d"
+            days = int(p.get('days') or 0)
+            label = f"{p.get('name')}" + (f" — {days}d" if days > 0 else "")
             kb.add(types.KeyboardButton(label))
         kb.add(types.KeyboardButton("⬅️ back"), types.KeyboardButton("🏠 home"))
         return kb
@@ -1056,7 +1071,10 @@ if bot:
             if usdt is not None:
                 price_bits.append(f"${usdt} USDT")
             price = ", ".join(price_bits) if price_bits else "N/A"
-            lines.append(f"• {p.get('name')} — {p.get('days')}d: {price}")
+            # Hide 0d for credit products
+            days = int(p.get('days') or 0)
+            label_days = (f" — {days}d" if days > 0 else "")
+            lines.append(f"• {p.get('name')}{label_days}: {price}")
         lines.append("")
         lines.append("Select a plan below to continue.")
         return "\n".join(lines)
@@ -1101,7 +1119,8 @@ if bot:
                     box_h = 150
                     draw.rectangle([30, y, w - 30, y + box_h], fill=(18, 20, 36), outline=(40, 45, 70), width=2)
                     draw.rectangle([30, y, 36, y + box_h], fill=accent)
-                    name = f"{p.get('name')} — {p.get('days')}d"
+                    days = int(p.get('days') or 0)
+                    name = f"{p.get('name')}" + (f" — {days}d" if days > 0 else "")
                     inr = p.get('price_inr')
                     usdt = p.get('price_usdt')
                     price_bits = []
@@ -1179,11 +1198,8 @@ if bot:
         return stop.set
 
     def build_payment_kb():
-        kb = types.InlineKeyboardMarkup(row_width=2)
-        kb.add(
-            types.InlineKeyboardButton("✅ Verify UPI", callback_data="pay:verify_upi"),
-            types.InlineKeyboardButton("✅ Verify USDT", callback_data="pay:verify_usdt"),
-        )
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(types.InlineKeyboardButton("✅ Verify UPI", callback_data="pay:verify_upi"))
         kb.add(
             types.InlineKeyboardButton("🏠 Main Menu", callback_data="menu:root"),
             types.InlineKeyboardButton("👤 Profile", callback_data="menu:profile"),
@@ -1192,7 +1208,23 @@ if bot:
 
     def build_payment_reply_kb():
         kb = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-        kb.add(types.KeyboardButton("📷 Scan UPI"), types.KeyboardButton("✅ Verify USDT"))
+        kb.add(types.KeyboardButton("📷 Scan UPI"))
+        kb.add(types.KeyboardButton("🧾 Upload Receipt"), types.KeyboardButton("👁️ View Receipt"))
+        kb.add(types.KeyboardButton("🏠 Main Menu"), types.KeyboardButton("👤 Profile"))
+        return kb
+
+    def build_payment_kb_upi_only():
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(types.InlineKeyboardButton("✅ Verify UPI", callback_data="pay:verify_upi"))
+        kb.add(
+            types.InlineKeyboardButton("🏠 Main Menu", callback_data="menu:root"),
+            types.InlineKeyboardButton("👤 Profile", callback_data="menu:profile"),
+        )
+        return kb
+
+    def build_payment_reply_kb_upi_only():
+        kb = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+        kb.add(types.KeyboardButton("📷 Scan UPI"))
         kb.add(types.KeyboardButton("🧾 Upload Receipt"), types.KeyboardButton("👁️ View Receipt"))
         kb.add(types.KeyboardButton("🏠 Main Menu"), types.KeyboardButton("👤 Profile"))
         return kb
@@ -1430,7 +1462,8 @@ if bot:
         except Exception:
             items = []
         for p in items or []:
-            label = f"{p.get('name')} — {p.get('days')}d"
+            days = int(p.get('days') or 0)
+            label = f"{p.get('name')}" + (f" — {days}d" if days > 0 else "")
             kb.add(types.InlineKeyboardButton(label, callback_data=f"plan:{p.get('id')}"))
         kb.add(
             types.InlineKeyboardButton("🏠 Main Menu", callback_data="menu:root"),
@@ -1481,24 +1514,26 @@ if bot:
         price_bits = []
         if p.get('price_inr') is not None: price_bits.append(f"₹{int(p['price_inr'])}")
         if p.get('price_usdt') is not None: price_bits.append(f"${p['price_usdt']} USDT")
-        lines = [
-            f"Plan: <b>{utils.escape_html(p.get('name'))}</b> — {p.get('days')} days",
-            f"Price: {', '.join(price_bits) or 'N/A'}",
-            "",
-            "Pay to any of these (then Verify):",
-            f"• UPI: <code>{utils.escape_html(upi)}</code>" if upi else None,
-            f"• USDT TRC20: <code>{utils.escape_html(tron)}</code>" if tron else None,
-            f"• USDT (EVM): <code>{utils.escape_html(evm)}</code>" if evm else None,
-            "",
-            "After paying, tap Verify and send the ID/hash or upload receipt (🧾).",
-        ]
-        text = "\n".join([x for x in lines if x])
+        days = int(p.get('days') or 0)
+        text = (
+            f"Plan: <b>{utils.escape_html(p.get('name'))}</b>" + (f" — {days} days" if days>0 else "") + "\n" +
+            f"Price: {', '.join(price_bits) or 'N/A'}\n\n" +
+            "📷 Scan the UPI QR below to pay (QR only). After paying, tap '✅ Verify UPI' or '🧾 Upload Receipt'."
+        )
         try:
             bot.answer_callback_query(call.id)
         except Exception:
             pass
         try:
-            bot.send_message(call.message.chat.id, text, reply_markup=build_payment_reply_kb())
+            rm = build_payment_reply_kb_upi_only() if days == 0 else build_payment_reply_kb()
+            bot.send_message(call.message.chat.id, text, reply_markup=rm)
+        except Exception:
+            pass
+        # Send QR for plan amount
+        try:
+            amt = float(p.get('price_inr')) if p.get('price_inr') is not None else None
+            note = f"{p.get('name')} {days}d" if days>0 else p.get('name')
+            send_upi_qr(call.message.chat.id, amount=amt, note=note)
         except Exception:
             pass
 
@@ -1697,18 +1732,12 @@ if bot:
         except Exception:
             items = []
         if not items:
-            # fallback to direct addresses
-            upi = os.getenv("UPI_ID")
-            usdt = os.getenv("USDT_TRC20_ADDRESS") or os.getenv("TRON_ADDRESS")
-            evm = os.getenv("EVM_ADDRESS")
-            lines = [
-                "💳 Payment options:",
-                f"- UPI: <code>{utils.escape_html(upi)}</code>" if upi else "- UPI: not configured",
-                f"- USDT TRC20: <code>{utils.escape_html(usdt)}</code>" if usdt else "- USDT TRC20: not configured",
-                f"- USDT (EVM: ETH/BSC/Polygon): <code>{utils.escape_html(evm)}</code>" if evm else "- USDT (EVM): not configured",
-            ]
             try:
-                bot.send_message(m.chat.id, "\n".join(lines), reply_markup=build_payment_reply_kb())
+                bot.send_message(m.chat.id, "📷 Scan the UPI QR below to pay. After payment, tap '✅ Verify UPI' or '🧾 Upload Receipt'.", reply_markup=build_payment_reply_kb())
+            except Exception:
+                pass
+            try:
+                send_upi_qr(m.chat.id)
             except Exception:
                 pass
             return
@@ -2154,13 +2183,14 @@ if bot:
             if len(code) == 6 and code.isalpha():
                 pair = f"{code[:3]}/{code[3:]}"
             else:
-                code_to_pair = {
-                    "BTCUSDT": "BTC/USDT",
-                    "ETHUSDT": "ETH/USDT",
-                    "GOLD": "GOLD",
-                    "NASDAQ": "NASDAQ",
-                }
-                pair = code_to_pair.get(code, code)
+                pair = code
+            allowed = {"EUR/USD","USD/JPY","GBP/USD","AUD/USD","USD/CHF","USD/CAD","NZD/USD"}
+            if (pair or "").upper() not in allowed:
+                try:
+                    bot.send_message(m.chat.id, "Please choose a pair from the list.", reply_markup=build_quick_assets_reply_kb())
+                except Exception:
+                    pass
+                return
             # Check market status before consuming quota
             try:
                 active_now = utils.is_pair_active_now(pair)
@@ -2185,12 +2215,34 @@ if bot:
             else:
                 quota = db.consume_signal_by_telegram_id(uid)
                 if not quota.get("ok"):
-                    msg = (
-                        "❗ Daily signal limit reached and no credits left.\n"
-                        "Each extra signal costs ₹150. Contact Support to top-up credits: "
-                        f"{utils.escape_html(SUPPORT_CONTACT)}"
-                    )
-                    utils.send_safe(bot, m.chat.id, msg)
+                    try:
+                        utils.send_safe(bot, m.chat.id, "❗ Daily signal limit reached and no credits left. Buy 1 credit for ₹15 via UPI.")
+                        urow = db.get_user_by_telegram_id(uid)
+                        if urow:
+                            try:
+                                items = db.list_products(active_only=True)
+                            except Exception:
+                                items = []
+                            credit = None
+                            for p in items or []:
+                                if int(p.get('days') or 0) == 0 and 'credit' in (p.get('name') or '').lower():
+                                    credit = p; break
+                            price_inr = (credit.get('price_inr') if credit else 15.0)
+                            try:
+                                if credit:
+                                    db.create_order(user_id=urow['id'], product_id=credit['id'], method='upi', amount=price_inr, currency='INR', status='pending')
+                            except Exception:
+                                pass
+                            try:
+                                bot.send_message(m.chat.id, "📷 Scan the UPI QR below to top-up 1 credit (₹15). After paying, tap '✅ Verify UPI' or '🧾 Upload Receipt'.", reply_markup=build_payment_reply_kb_upi_only())
+                            except Exception:
+                                pass
+                            try:
+                                send_upi_qr(m.chat.id, amount=price_inr, note=(credit.get('name') if credit else 'Credits x1'))
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                     return
             stop_loading_tf = start_chat_action(m.chat.id, "typing")
             try:
@@ -2460,18 +2512,13 @@ if bot:
             bot.answer_callback_query(call.id)
         except Exception:
             pass
-        if action == "verify_upi":
-            txt = "📷 Scan the UPI QR below to pay. After paying, tap '🧾 Upload Receipt' and send the screenshot."
-        elif action == "verify_usdt":
-            txt = "Send your USDT tx hash using:\n<code>/verify_usdt TX_HASH</code>"
-        else:
-            txt = "Payment support"
+        txt = "📷 Scan the UPI QR below to pay. After paying, tap '🧾 Upload Receipt' and send the screenshot."
         # Remember chosen method on latest pending order
         try:
             uid = call.from_user.id
             order = db.get_latest_pending_order_by_user_and_method(db.get_user_by_telegram_id(uid)['id'], None)
             if order:
-                db.update_order_method(order['id'], 'upi' if action == 'verify_upi' else 'usdt')
+                db.update_order_method(order['id'], 'upi')
         except Exception:
             pass
         try:
@@ -2479,22 +2526,21 @@ if bot:
         except Exception:
             pass
         # For UPI, also send QR with amount if available from latest order
-        if action == "verify_upi":
-            amt = None
-            note = None
-            try:
-                uid = call.from_user.id
-                urow = db.get_user_by_telegram_id(uid)
-                order = db.get_latest_pending_order_by_user_and_method(urow['id'], None) if urow else None
-                prod = db.get_product(order.get('product_id')) if order and order.get('product_id') else None
-                amt = prod.get('price_inr') if prod and prod.get('price_inr') is not None else None
-                note = f"{prod.get('name')} {prod.get('days')}d" if prod else None
-            except Exception:
-                pass
-            try:
-                send_upi_qr(call.message.chat.id, amount=amt, note=note)
-            except Exception:
-                pass
+        amt = None
+        note = None
+        try:
+            uid = call.from_user.id
+            urow = db.get_user_by_telegram_id(uid)
+            order = db.get_latest_pending_order_by_user_and_method(urow['id'], None) if urow else None
+            prod = db.get_product(order.get('product_id')) if order and order.get('product_id') else None
+            amt = prod.get('price_inr') if prod and prod.get('price_inr') is not None else None
+            note = f"{prod.get('name')} {prod.get('days')}d" if prod else None
+        except Exception:
+            pass
+        try:
+            send_upi_qr(call.message.chat.id, amount=amt, note=note)
+        except Exception:
+            pass
 
     @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("back:"))
     def on_back_click(call: types.CallbackQuery):
@@ -2595,34 +2641,54 @@ if bot:
         _, asset_code, tf = call.data.split(":", 2)
         code = asset_code[:-4] if asset_code.endswith("_OTC") else asset_code
         pair = (f"{code[:3]}/{code[3:]}" if len(code) == 6 else code)
-        # Do not consume quota if market closed; show next open time instead
+        # Do not consume quota if pair not active per IST windows
         try:
-            open_now = utils._market_open_for_asset(pair)
+            active_now = utils.is_pair_active_now(pair)
         except Exception:
-            open_now = True
-        if not open_now:
+            active_now = True
+        if not active_now:
             try:
-                nxt = utils.next_open_for_asset(pair)
-                when = utils.format_ts_iso(nxt) if nxt else "-"
+                nxt = utils.next_active_for_pair(pair)
+                when = utils._fmt(nxt, utils.IST_TZ) if nxt else "-"
                 bot.answer_callback_query(call.id)
             except Exception:
                 pass
             try:
-                bot.send_message(call.message.chat.id, f"Market closed for {pair}. Next open: <b>{when}</b>")
+                bot.send_message(call.message.chat.id, f"Market inactive for {pair}. Next active: <b>{when}</b>")
             except Exception:
                 pass
             return
         if _user_has_premium(user):
             quota = db.consume_signal_by_telegram_id(uid)
             if not quota.get("ok"):
-                msg = (
-                    "❗ Daily signal limit reached and no credits left.\n"
-                    "Each extra signal costs ₹150. Contact Support to top-up credits: "
-                    f"{utils.escape_html(SUPPORT_CONTACT)}"
-                )
-                utils.send_safe(bot, call.message.chat.id, msg)
                 try:
-                    bot.answer_callback_query(call.id)
+                    utils.send_safe(bot, call.message.chat.id, "❗ Daily signal limit reached and no credits left. Buy 1 credit for ₹15 via UPI.")
+                    urow = db.get_user_by_telegram_id(uid)
+                    if urow:
+                        # Start UPI credit top-up
+                        try:
+                            # Pick credit product (days=0, name contains 'credit')
+                            items = db.list_products(active_only=True)
+                        except Exception:
+                            items = []
+                        credit = None
+                        for p in items or []:
+                            if int(p.get('days') or 0) == 0 and 'credit' in (p.get('name') or '').lower():
+                                credit = p; break
+                        price_inr = (credit.get('price_inr') if credit else 15.0)
+                        try:
+                            if credit:
+                                db.create_order(user_id=urow['id'], product_id=credit['id'], method='upi', amount=price_inr, currency='INR', status='pending')
+                        except Exception:
+                            pass
+                        try:
+                            bot.send_message(call.message.chat.id, "📷 Scan the UPI QR below to top-up 1 credit (₹15). After paying, tap '✅ Verify UPI' or '🧾 Upload Receipt'.", reply_markup=build_payment_reply_kb_upi_only())
+                        except Exception:
+                            pass
+                        try:
+                            send_upi_qr(call.message.chat.id, amount=price_inr, note=(credit.get('name') if credit else 'Credits x1'))
+                        except Exception:
+                            pass
                 except Exception:
                     pass
                 return

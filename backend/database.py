@@ -476,6 +476,17 @@ def ensure_default_products():
                     "INSERT INTO products (name, description, days, price_inr, price_usdt, active) VALUES (%s,%s,%s,%s,%s,TRUE)",
                     (name, desc, days, inr, usdt),
                 )
+        # Ensure a default UPI-only credit product exists
+        try:
+            cur.execute("SELECT id FROM products WHERE LOWER(name) LIKE LOWER('%credit%') AND days=0 LIMIT 1")
+            r = cur.fetchone()
+            if not r:
+                cur.execute(
+                    "INSERT INTO products (name, description, days, price_inr, price_usdt, active) VALUES (%s,%s,%s,%s,%s,TRUE)",
+                    ("Credits x1", "Top-up credits (UPI only)", 0, 15.0, None),
+                )
+        except Exception:
+            pass
         # Orders table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS orders (

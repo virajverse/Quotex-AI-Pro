@@ -541,6 +541,21 @@ def ensure_default_products():
             )
         conn.commit()
 
+def ensure_credit_product():
+    """Ensure a default UPI-only credit product exists (days=0, ₹15)."""
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        # Look for any credit product with days=0
+        cursor.execute("SELECT id FROM products WHERE LOWER(name) LIKE LOWER('%credit%') AND days=0 LIMIT 1")
+        r = cursor.fetchone()
+        if r:
+            return
+        cursor.execute(
+            'INSERT INTO products (name, description, days, price_inr, price_usdt, active) VALUES (?,?,?,?,?,1)',
+            ("Credits x1", "Top-up credits (UPI only)", 0, 15.0, None)
+        )
+        conn.commit()
+
 def delete_product(product_id: int):
     # soft delete
     update_product(product_id, active=False)

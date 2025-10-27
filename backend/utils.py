@@ -188,49 +188,7 @@ def evaluate_pending_signals(db, max_batch: int = 200) -> int:
     return evaluated
 
 
-def generate_signal() -> str:
-    """Generate a formatted, imaginary trading signal.
-    Output is plain text with pair, direction, confidence, reason, and disclaimer.
-    """
-    assets = [
-        "BTC/USDT",
-        "ETH/USDT",
-        "EUR/USD",
-        "GBP/JPY",
-        "GOLD",
-        "NASDAQ",
-    ]
-    pair = random.choice(assets)
-
-    direction_up = random.choice([True, False])
-    direction = "UP" if direction_up else "DOWN"
-    emoji = "📈" if direction_up else "📉"
-
-    confidence = random.randint(3, 5)
-
-    reasons_up = [
-        "EMA50 crossed above EMA200, bullish bias",
-        "MACD histogram turning positive",
-        "RSI(14) above 55 indicating momentum",
-        "Higher lows on 5m timeframe",
-        "Price holding above VWAP",
-    ]
-    reasons_down = [
-        "EMA50 crossed below EMA200, bearish bias",
-        "MACD histogram turning negative",
-        "RSI(14) below 45 indicating weakness",
-        "Lower highs on 5m timeframe",
-        "Price rejecting below VWAP",
-    ]
-    reason = ", ".join(random.sample(reasons_up if direction_up else reasons_down, k=2))
-
-    return (
-        f"{pair}\n"
-        f"{emoji} Direction: {direction}\n"
-        f"💡 Confidence: {confidence}/5\n"
-        f"Reason: {reason}.\n"
-        f"⚠️ This is not financial advice."
-    )
+ 
 
 
 def _fmt(dt: datetime, tz: Optional[ZoneInfo] = None) -> str:
@@ -309,144 +267,7 @@ def next_active_for_pair(pair: str, now_utc: Optional[datetime] = None) -> Optio
     return None
 
 
-def market_hours_message() -> str:
-    """Build a human-friendly market hours status for key instruments.
-    Shows OPEN/CLOSED and next open/close in configured timezone.
-    """
-    disp_tz = ZoneInfo(os.getenv("TIMEZONE", "UTC"))
-    now_utc = datetime.now(timezone.utc)
-    now_disp = now_utc.astimezone(disp_tz)
-
-    # --- Crypto (24/7) ---
-    crypto_lines = []
-    for name in ("BTC/USDT", "ETH/USDT"):
-        crypto_lines.append(f"{name} — OPEN (24/7)")
-
-    # --- Forex (24x5) ---
-    # Open: Sun >= 21:00 UTC to Fri < 21:00 UTC
-    def fx_is_open(t: datetime) -> bool:
-        wd = t.weekday()  # Mon=0..Sun=6
-        hour = t.hour
-        if wd in (0, 1, 2, 3):
-            return True
-        if wd == 4:
-            return hour < 21
-        if wd == 6:
-            return hour >= 21
-        return False
-
-    def fx_next_open_close(t: datetime) -> Dict[str, Optional[datetime]]:
-        open_now = fx_is_open(t)
-        if open_now:
-            # next close is Friday 21:00 UTC
-            days_to_fri = (4 - t.weekday()) % 7
-            close_day = (t + timedelta(days=days_to_fri)).date()
-            close_dt = datetime.combine(close_day, time(21, 0), tzinfo=timezone.utc)
-            if close_dt <= t:
-                # already past close today; next week's Friday
-                close_dt += timedelta(days=7)
-            return {"open": None, "close": close_dt}
-        else:
-            # next open is Sunday 21:00 UTC
-            days_to_sun = (6 - t.weekday()) % 7
-            open_day = (t + timedelta(days=days_to_sun)).date()
-            open_dt = datetime.combine(open_day, time(21, 0), tzinfo=timezone.utc)
-            if open_dt <= t:
-                open_dt += timedelta(days=7)
-            return {"open": open_dt, "close": None}
-
-    fx_pairs = ("EUR/USD", "GBP/JPY")
-    fx_open = fx_is_open(now_utc)
-    fx_times = fx_next_open_close(now_utc)
-    if fx_open:
-        fx_line = f"{', '.join(fx_pairs)} — OPEN (24x5) · Next close: {_fmt(fx_times['close'], disp_tz)}"
-    else:
-        fx_line = f"{', '.join(fx_pairs)} — CLOSED (Weekend) · Next open: {_fmt(fx_times['open'], disp_tz)}"
-
-    # --- Gold (XAUUSD) approximate retail hours ---
-    # Open: Sun 23:00 UTC → Fri 22:00 UTC, daily 1h break 22:00–23:00 UTC
-    def gold_is_open(t: datetime) -> bool:
-        wd = t.weekday()
-        h = t.hour
-        # daily break 22:00-23:00 UTC
-        in_break = (h == 22)
-        if in_break:
-            return False
-        if wd == 6:  # Sunday
-            return h >= 23
-        if wd in (0, 1, 2, 3):  # Mon-Thu
-            return True
-        if wd == 4:  # Friday
-            return h < 22
-        return False  # Saturday
-
-    def gold_next_open_close(t: datetime) -> Dict[str, Optional[datetime]]:
-        open_now = gold_is_open(t)
-        if open_now:
-            # Next close: if Fri before 22:00 then Fri 22:00, else next daily break 22:00
-            wd = t.weekday()
-            # close for the day is 22:00 UTC
-            today_2200 = datetime.combine(t.date(), time(22, 0), tzinfo=timezone.utc)
-            if t < today_2200:
-                close_dt = today_2200
-            else:
-                # if passed 22:00 and not Friday close, next day 22:00
-                close_dt = today_2200 + timedelta(days=1)
-            # On Friday after 22:00 the market is closed until Sunday 23:00
-            if wd == 4 and t >= today_2200:
-                # next close already occurred; keep as today_2200
-                pass
-            return {"open": None, "close": close_dt}
-        else:
-            # If in daily break: next open at 23:00 UTC same day; else Sunday 23:00 UTC
-            wd = t.weekday()
-            h = t.hour
-            if h == 22 and wd in (0, 1, 2, 3):  # Mon-Thu break
-                open_dt = datetime.combine(t.date(), time(23, 0), tzinfo=timezone.utc)
-            elif wd == 6 and h < 23:  # Sunday before open
-                open_dt = datetime.combine(t.date(), time(23, 0), tzinfo=timezone.utc)
-            else:
-                # next Sunday 23:00 UTC
-                next_sun = _next_weekday(t, 6)
-                open_dt = datetime.combine(next_sun.date(), time(23, 0), tzinfo=timezone.utc)
-            return {"open": open_dt, "close": None}
-
-    gold_open = gold_is_open(now_utc)
-    gold_times = gold_next_open_close(now_utc)
-    gold_line = (
-        f"GOLD — {'OPEN' if gold_open else 'CLOSED'} · "
-        f"{'Next close: ' + _fmt(gold_times['close'], disp_tz) if gold_open else 'Next open: ' + _fmt(gold_times['open'], disp_tz)}"
-    )
-
-    # --- NASDAQ cash session ---
-    ny = ZoneInfo("America/New_York")
-    now_ny = now_utc.astimezone(ny)
-    wd_ny = now_ny.weekday()
-    open_start = time(9, 30)
-    open_end = time(16, 0)
-    in_window = (wd_ny < 5) and (open_start <= now_ny.time() < open_end)
-    if in_window:
-        close_dt_ny = datetime.combine(now_ny.date(), open_end, tzinfo=ny)
-        ndq_line = f"NASDAQ — OPEN (US cash) · Next close: {_fmt(close_dt_ny.astimezone(timezone.utc))}"
-    else:
-        # compute next weekday open 9:30 NY
-        next_day = now_ny
-        while True:
-            next_day = (next_day + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-            if next_day.weekday() < 5:
-                break
-        open_dt_ny = datetime.combine(next_day.date(), open_start, tzinfo=ny)
-        ndq_line = f"NASDAQ — CLOSED (US cash) · Next open: {_fmt(open_dt_ny.astimezone(timezone.utc))}"
-
-    lines = [
-        f"🕒 Now: {now_disp.strftime('%Y-%m-%d %H:%M %Z')}",
-        "",
-        *crypto_lines,
-        fx_line,
-        gold_line,
-        ndq_line,
-    ]
-    return "\n".join(lines)
+ 
 
 
 def market_hours_message_for_pairs(pairs: list[str]) -> str:
@@ -897,11 +718,10 @@ def _seeded_rng(asset: str, timeframe: str) -> random.Random:
 
 
 def _classify_asset(asset: str) -> str:
-    a = asset.upper()
-    if "BTC" in a or "ETH" in a: return "crypto"
-    if "/" in a and any(fx in a for fx in ("USD","EUR","GBP","JPY","INR")): return "forex"
-    if "GOLD" in a or "XAU" in a: return "gold"
-    if "NASDAQ" in a or "NDQ" in a: return "index"
+    a = (asset or "").upper()
+    # Only support FX pairs now
+    if "/" in a and any(ccy in a for ccy in ("USD","EUR","GBP","JPY","INR","CHF","AUD","CAD","NZD")):
+        return "forex"
     return "other"
 
 
@@ -987,122 +807,7 @@ def next_open_for_asset(asset: str, now_utc: Optional[datetime] = None) -> Optio
     return None
 
 
-def generate_smart_signal(asset: Optional[str] = None, timeframe: str = "5m") -> str:
-    """Multi-confirmation signal with live data if available.
-    Priority: Finnhub -> TwelveData -> AlphaVantage. Falls back to pseudo if none.
-    """
-    assets = ["BTC/USDT", "ETH/USDT", "EUR/USD", "GBP/JPY", "GOLD", "NASDAQ"]
-    pair = asset or random.choice(assets)
-
-    # Try live indicators
-    live = get_live_indicators(pair, timeframe)
-    if live and live.get("ok"):
-        rsi = live.get("rsi", 50)
-        macd_hist = live.get("macd_hist", 0)
-        ema_fast_over_slow = live.get("ema_fast_over_slow", False)
-        bb_pos = live.get("bb_pos", 0)
-        stoch = live.get("stoch", 50)
-        volume_spike = False  # Not computed without volume; keep neutral
-        bullish_engulf = False
-        bearish_engulf = False
-        demand_zone = False
-        supply_zone = False
-        fvg_bull = False
-        fvg_bear = False
-    else:
-        rng = _seeded_rng(pair, timeframe)
-        # Pseudo indicators
-        rsi = rng.randint(10, 90)
-        macd_hist = rng.uniform(-2.0, 2.0)
-        ema_fast_over_slow = rng.random() > 0.45
-        bb_pos = rng.uniform(-2.0, 2.0)
-        stoch = rng.randint(10, 90)
-        volume_spike = rng.random() < 0.35
-        bullish_engulf = rng.random() < 0.3
-        bearish_engulf = rng.random() < 0.3
-        demand_zone = rng.random() < 0.35
-        supply_zone = rng.random() < 0.35
-        fvg_bull = rng.random() < 0.25
-        fvg_bear = rng.random() < 0.25
-
-    # Scores
-    up_score = 0.0
-    down_score = 0.0
-    reasons_up = []
-    reasons_down = []
-
-    # Indicator-based confirmations
-    if rsi < 30:
-        up_score += 0.7; reasons_up.append("RSI(14) oversold")
-    if rsi > 70:
-        down_score += 0.7; reasons_down.append("RSI(14) overbought")
-
-    if macd_hist > 0:
-        up_score += 0.6; reasons_up.append("MACD histogram rising")
-    if macd_hist < 0:
-        down_score += 0.6; reasons_down.append("MACD histogram falling")
-
-    if ema_fast_over_slow:
-        up_score += 0.6; reasons_up.append("EMA20 above EMA50")
-    else:
-        down_score += 0.6; reasons_down.append("EMA20 below EMA50")
-
-    if bb_pos < -1.0:
-        up_score += 0.5; reasons_up.append("Price near/below lower Bollinger Band")
-    if bb_pos > 1.0:
-        down_score += 0.5; reasons_down.append("Price near/above upper Bollinger Band")
-
-    if stoch < 20:
-        up_score += 0.3; reasons_up.append("Stochastic oversold")
-    if stoch > 80:
-        down_score += 0.3; reasons_down.append("Stochastic overbought")
-
-    # Price action
-    if bullish_engulf: up_score += 0.5; reasons_up.append("Bullish engulfing")
-    if bearish_engulf: down_score += 0.5; reasons_down.append("Bearish engulfing")
-    if demand_zone: up_score += 0.4; reasons_up.append("At demand zone")
-    if supply_zone: down_score += 0.4; reasons_down.append("At supply zone")
-
-    # Volume/momentum
-    if volume_spike and macd_hist > 0:
-        up_score += 0.4; reasons_up.append("Volume spike with positive momentum")
-    if volume_spike and macd_hist < 0:
-        down_score += 0.4; reasons_down.append("Volume spike with negative momentum")
-
-    # SMC
-    if fvg_bull: up_score += 0.4; reasons_up.append("Bullish FVG context")
-    if fvg_bear: down_score += 0.4; reasons_down.append("Bearish FVG context")
-
-    # Simple news/illiquid filter stub
-    open_now = _market_open_for_asset(pair)
-    if not open_now:
-        # Penalize confidence during closed/illiquid windows
-        up_score *= 0.6
-        down_score *= 0.6
-
-    # Direction and confidence
-    direction_up = up_score >= down_score
-    direction = "UP" if direction_up else "DOWN"
-    emoji = "📈" if direction_up else "📉"
-    top_reasons = reasons_up if direction_up else reasons_down
-    # Build concise reasons (max 3)
-    reason_text = ", ".join(top_reasons[:3]) or ("EMA crossover" if direction_up else "Momentum slowdown")
-
-    # Confidence maps difference into 1..5 with floor 2 and cap 5
-    gap = abs(up_score - down_score)
-    base = 2.0 + min(3.0, gap * 2.0)  # 2..5
-    confidence = int(round(base))
-
-    sess_names = _sessions_active_now_ist()
-    win_txt = _pair_window_text(pair)
-    return (
-        f"{pair} · TF: {timeframe}\n"
-        f"{emoji} Direction: {direction}\n"
-        f"💡 Confidence: {confidence}/5\n"
-        f"Reason: {reason_text}.\n"
-        f"Session: {sess_names} · Active window: {win_txt}\n"
-        f"⚠️ This is not financial advice."
-    )
+ 
 
 def _sessions_active_now_ist() -> str:
     now_ist = datetime.now(timezone.utc).astimezone(IST_TZ)
@@ -1880,90 +1585,29 @@ def _segments_from_dirs(closes: List[float], dirs: List[int]) -> List[Tuple[int,
     segs.append((start, len(dirs)-1, cur))
     return segs
 
-def generate_24h_performance_report(pairs: Optional[List[str]] = None, timeframe: str = "5m") -> str:
-    pairs = pairs or [
-        "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","ADAUSDT","XRPUSDT",
-        "DOGEUSDT","MATICUSDT","LTCUSDT","GRTUSDT","JASMYUSDT","CAKEUSDT",
-        "ARBUSDT","SANDUSDT","TIAUSDT","KNCUSDT","XLMUSDT"
-    ]
-    bars = _bars_for_tf(timeframe)
-    warmup = 200
-    limit = warmup + bars + 2
-    lines: List[str] = ["📈 VIP Channel's Profit in the last 24 hours", "", ""]
-    total_profit = 0.0
-    total_trades = 0
-    wins = 0
-    winners: List[str] = []
-    losers: List[str] = []
-    for p in pairs:
-        sym = _binance_symbol(p)
-        if not sym:
-            continue
-        kl = fetch_klines_binance(sym, timeframe, limit)
-        if not kl or len(kl) < warmup + 10:
-            continue
-        kl = kl[-(warmup+bars):]
-        c = [float(x[4]) for x in kl]
-        c24 = c[-bars:]
-        open_price = c24[0]
-        close_price = c24[-1]
-        price_delta = (close_price - open_price) / (open_price or 1) * 100.0
-        dirs: List[int] = []
-        start_idx = max(60, len(c) - bars)
-        for t in range(start_idx, len(c)-1):
-            sub = c[:t+1]
-            d = _dir_from_indicators(sub)
-            dirs.append(d)
-        if not dirs:
-            continue
-        c_region = c[start_idx:]
-        segs = _segments_from_dirs(c_region, dirs)
-        pair_profit = 0.0
-        pair_trades = 0
-        pair_wins = 0
-        for s,e,sgn in segs:
-            if e <= s or e >= len(c_region):
-                continue
-            entry = c_region[s]
-            exitp = c_region[e]
-            pct = (exitp - entry) / entry * 100.0 * (1 if sgn>0 else -1)
-            pair_profit += pct
-            pair_trades += 1
-            if pct > 0:
-                pair_wins += 1
-        total_profit += pair_profit
-        total_trades += pair_trades
-        wins += pair_wins
-        if pair_trades == 0:
-            continue
-        emoji = "🟢" if pair_profit >= 0 else "🚫"
-        label = p.replace("/", "").upper()
-        def _fmt_price(v: float) -> str:
-            if v >= 100:
-                return f"{v:.2f}"
-            if v >= 1:
-                return f"{v:.4f}"
-            return f"{v:.6f}"
-        wl = f"{pair_wins}/{max(pair_trades - pair_wins,0)}"
-        lines.append(f"{label:<11}: {pair_profit:+.2f}% {emoji} | Open: {_fmt_price(open_price)}  Close: {_fmt_price(close_price)} | PriceΔ: {price_delta:+.2f}% | Trades W/L: {wl}")
-        if pair_profit >= 0:
-            winners.append(label)
-        else:
-            losers.append(label)
-    lines.append("")
-    if total_trades > 0:
-        avg = total_profit / total_trades
-        wr = (wins / total_trades) * 100.0
-        lines.extend([
-            f"💰 Total Profit: {total_profit:.2f}% Profit",
-            f"💹 Average Profit/Trade: {avg:.2f}%",
-            f"📡 Signal Calls: {total_trades}",
-            f"📊 Win Rate: {wr:.2f}%",
-            f"🟢 Profit Trades: {wins}",
-            f"🚫 Loss Trades: {total_trades - wins}",
-        ])
-        if winners:
-            lines.append("✅ Winners: " + ", ".join(winners))
-    else:
-        lines.append("No trades generated. Check Finnhub access and pair list.")
-    return "\n".join(lines)
+
+def fetch_ohlc_binance(symbol: str, timeframe: str, limit: int = 300) -> Optional[List[float]]:
+    try:
+        interval = timeframe
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={min(max(limit,1),1000)}"
+        r = safe_request("GET", url, timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        closes = [float(item[4]) for item in data if item and len(item) > 5]
+        return closes
+    except Exception:
+        return None
+
+def fetch_klines_binance(symbol: str, timeframe: str, limit: int = 300) -> Optional[List[list]]:
+    try:
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={timeframe}&limit={min(max(limit,1),1000)}"
+        r = safe_request("GET", url, timeout=5)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if not isinstance(data, list):
+            return None
+        return data
+    except Exception:
+        return None

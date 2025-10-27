@@ -1207,8 +1207,17 @@ if bot:
         kb.add(types.KeyboardButton("🏠 Main Menu"), types.KeyboardButton("👤 Profile"))
         return kb
 
-    def build_assets_reply_page_kb(category: str, page: int = 0, page_size: int = 10):
+    def _pairs_for_category(category: str) -> list[str]:
         pairs = PAIRS_BASE[:]
+        if category == "live":
+            try:
+                pairs = [p for p in pairs if utils._market_open_for_asset(p)]
+            except Exception:
+                pass
+        return pairs
+
+    def build_assets_reply_page_kb(category: str, page: int = 0, page_size: int = 10):
+        pairs = _pairs_for_category(category)
         start = max(page, 0) * page_size
         end = start + page_size
         page_pairs = pairs[start:end]
@@ -2010,7 +2019,7 @@ if bot:
                 pass
             return
         if "market hours" in txt:
-            msg = utils.market_hours_message()
+            msg = utils.market_hours_message_for_pairs(PAIRS_BASE)
             try:
                 bot.send_message(m.chat.id, msg, reply_markup=build_main_reply_kb(user))
             except Exception:
@@ -2082,7 +2091,7 @@ if bot:
             if txt == "◀ prev" and page > 0:
                 page -= 1
             elif txt == "next ▶":
-                total_pages = (len(PAIRS_BASE) - 1) // 10
+                total_pages = max(0, (len(_pairs_for_category(cat)) - 1) // 10)
                 if page < total_pages:
                     page += 1
             elif txt == "⬅️ categories":

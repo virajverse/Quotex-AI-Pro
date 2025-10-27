@@ -409,36 +409,27 @@ def market_hours_message_for_pairs(pairs: list[str]) -> str:
         f"LIVE FX — CLOSED (Weekend) · Next open: {_fmt(fx_times['open'], disp_tz)}"
     )
 
-    # Sessions (local time windows)
-    def _sess_line(name: str, z: str, start: time, end: time) -> str:
-        zone = ZoneInfo(z)
-        now_local = now_utc.astimezone(zone)
-        open_today = (now_local.weekday() < 5) and (start <= now_local.time() < end)
-        return f"{name}: {now_local.strftime('%H:%M %Z')} — {start.strftime('%H:%M')}–{end.strftime('%H:%M')} {'OPEN' if open_today else 'CLOSED'}"
-
-    sessions = [
-        _sess_line("Tokyo", "Asia/Tokyo", time(9,0), time(18,0)),
-        _sess_line("London", "Europe/London", time(8,0), time(17,0)),
-        _sess_line("New York", "America/New_York", time(8,0), time(17,0)),
-    ]
-
     pairs = [p for p in pairs or [] if "/" in (p or "")]  # only valid
-    pair_lines = []
-    if fx_open:
-        pair_lines = [f"{p} — OPEN (24x5)" for p in pairs]
-    else:
-        nxt = _fmt(fx_times['open'], disp_tz)
-        pair_lines = [f"{p} — CLOSED · Next open: {nxt}" for p in pairs]
+    open_pairs: list[str] = []
+    closed_pairs: list[tuple[str, str]] = []  # (pair, next_open_str)
+    for p in pairs:
+        is_open = _market_open_for_asset(p, now_utc)
+        if is_open:
+            open_pairs.append(p)
+        else:
+            nxt_dt = next_open_for_asset(p, now_utc)
+            nxt_str = _fmt(nxt_dt, disp_tz) if nxt_dt else "Unknown"
+            closed_pairs.append((p, nxt_str))
 
     lines = [
         f"🕒 Now: {now_disp.strftime('%Y-%m-%d %H:%M %Z')}",
         fx_header,
         "",
-        "Sessions (local time):",
-        *sessions,
+        "LIVE now:",
+        *( [f"• {p}" for p in open_pairs] if open_pairs else ["• None"] ),
         "",
-        "Pairs:",
-        *pair_lines,
+        "CLOSED now:",
+        *( [f"• {p} — Next open: {n}" for (p, n) in closed_pairs] if closed_pairs else ["• None"] ),
     ]
     return "\n".join(lines)
 

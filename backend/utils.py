@@ -481,16 +481,16 @@ def fetch_ohlc_yahoo_fx(pair: str, timeframe: str, limit: int = 200) -> Optional
     """
     up = (pair or "").upper().replace("/", "") + "=X"
     if timeframe == "3m":
-        interval = "1m"  # best-effort mapping
-        range_s = "2h"
+        interval = "1m"
+        range_s = "1h"
     elif timeframe == "5m":
         interval = "5m"
         range_s = "1d"
     else:
         interval = "1m"
-        range_s = "2h"
+        range_s = "1h"
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{up}?interval={interval}&range={range_s}"
-    r = safe_request("GET", url, timeout=8)
+    r = safe_request("GET", url, timeout=5)
     if not r or r.status_code != 200:
         return None
     j = r.json() or {}
@@ -510,7 +510,7 @@ def fetch_klines_yahoo_fx(pair: str, interval: str = "1m", range_s: str = "2h") 
     """
     up = (pair or "").upper().replace("/", "") + "=X"
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{up}?interval={interval}&range={range_s}"
-    r = safe_request("GET", url, timeout=8)
+    r = safe_request("GET", url, timeout=5)
     if not r or r.status_code != 200:
         return None
     j = r.json() or {}
@@ -890,8 +890,7 @@ def get_live_indicators(pair: str, timeframe: str) -> Dict[str, Any]:
             if timeframe == "5m":
                 kl = fetch_klines_yahoo_fx(pair, interval="5m", range_s="1d")
             else:
-                # Treat 1m and 3m via 1m then resample
-                kl = fetch_klines_yahoo_fx(pair, interval="1m", range_s="2h")
+                kl = fetch_klines_yahoo_fx(pair, interval="1m", range_s="1h")
         except Exception:
             kl = None
     if kl and len(kl) >= 60:
@@ -986,7 +985,7 @@ def _mtf_from_base_1m(pair: str) -> Optional[Dict[str, Dict[str, Any]]]:
     # Yahoo FX OHLCV fallback for 1m if no Finnhub
     if (not kl or len(kl) < 120) and cls == "forex":
         try:
-            kl = fetch_klines_yahoo_fx(pair, interval="1m", range_s="2h")
+            kl = fetch_klines_yahoo_fx(pair, interval="1m", range_s="1h")
         except Exception:
             kl = None
     if not kl or len(kl) < 120:
@@ -1369,7 +1368,7 @@ def fetch_klines_twelvedata(pair: str, timeframe: str, limit: int = 240) -> Opti
         f"https://api.twelvedata.com/time_series?symbol={sym}&interval={interval}&outputsize={limit}&apikey={key}&format=JSON&dp=6&order=ASC"
     )
     try:
-        r = safe_request("GET", url, timeout=8)
+        r = safe_request("GET", url, timeout=5)
         if r.status_code != 200:
             return None
         j = r.json()

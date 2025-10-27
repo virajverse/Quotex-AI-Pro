@@ -1235,6 +1235,18 @@ if bot:
         kb.add(types.KeyboardButton("🏠 Main Menu"), types.KeyboardButton("👤 Profile"))
         return kb
 
+    def _warm_pair_cache(pair: str):
+        try:
+            # Pre-fetch multi-timeframe (1m-based) and entry prices to warm fast cache
+            utils._mtf_from_base_1m(pair)
+        except Exception:
+            pass
+        try:
+            utils.get_entry_price(pair, "1m")
+            utils.get_entry_price(pair, "5m")
+        except Exception:
+            pass
+
     def _pairs_for_category(category: str) -> list[str]:
         pairs = PAIRS_BASE[:]
         if category == "live":
@@ -2184,6 +2196,14 @@ if bot:
         if txt in asset_map:
             SIGNAL_LAST[m.from_user.id] = asset_map[txt]
             _send_kb_quietly(m.chat.id, build_timeframes_reply_kb())
+            # Warm caches in background for instant TF response
+            try:
+                code = asset_map[txt]
+                code2 = code[:-4] if code.endswith("_OTC") else code
+                pair = (f"{code2[:3]}/{code2[3:]}" if len(code2) == 6 else code2)
+                threading.Thread(target=_warm_pair_cache, args=(pair,), daemon=True).start()
+            except Exception:
+                pass
             return
         if txt in ("1m", "3m", "5m"):
             asset_code = SIGNAL_LAST.get(m.from_user.id)
@@ -2258,14 +2278,69 @@ if bot:
                     except Exception:
                         pass
                     return
-            stop_loading_tf = start_chat_action(m.chat.id, "typing")
+            # Send instant placeholder, compute in background and edit
             try:
-                text = utils.generate_ensemble_signal(pair, txt)
-            finally:
+                bot.send_chat_action(m.chat.id, "typing")
+            except Exception:
+                pass
+            placeholder = f"Analyzing {pair} · TF: {txt}\nPlease wait…"
+            try:
+                base_msg = bot.send_message(m.chat.id, placeholder, reply_markup=build_timeframes_reply_kb())
+            except Exception:
+                base_msg = None
+            def _compute_and_edit():
+                stop_loading_tf = start_chat_action(m.chat.id, "typing")
                 try:
-                    stop_loading_tf()
+                    text = utils.generate_ensemble_signal(pair, txt)
+                finally:
+                    try:
+                        stop_loading_tf()
+                    except Exception:
+                        pass
+                _src = quota.get('source')
+                _src_label = 'Daily plan' if _src == 'daily' else ('Credit pack' if _src == 'credit' else 'Free sample')
+                _left = max(quota.get('daily_limit',0)-quota.get('used_today',0),0)
+                _credits = quota.get('credits',0)
+                footer = (
+                    "\n— Account —\n"
+                    f"• Daily signals left: {_left}\n"
+                    f"• Credit balance: {_credits}\n"
+                    f"• Access type: {_src_label}"
+                )
+                # Compute entry price now for display
+                def _fmt(v):
+                    if v is None:
+                        return "-"
+                    v = float(v)
+                    if v >= 100: return f"{v:.2f}"
+                    if v >= 1: return f"{v:.4f}"
+                    return f"{v:.6f}"
+                entry_price_now = None
+                try:
+                    entry_price_now = utils.get_entry_price(pair, txt)
+                    if entry_price_now is None:
+                        for alt in ("1m", "5m", "3m"):
+                            ep = utils.get_entry_price(pair, alt)
+                            if ep is not None:
+                                entry_price_now = ep
+                                break
+                    if entry_price_now is None:
+                        entry_price_now = utils.get_close_at_time(pair, txt, datetime.now(timezone.utc).isoformat())
                 except Exception:
-                    pass
+                    entry_price_now = None
+                base_text = text + f"\nEntry price: <code>{_fmt(entry_price_now)}</code>" + "\n" + footer
+                try:
+                    if base_msg is not None:
+                        bot.edit_message_text(base_text, m.chat.id, getattr(base_msg, 'message_id', None), reply_markup=build_timeframes_reply_kb(), parse_mode=None)
+                    else:
+                        bot.send_message(m.chat.id, base_text, reply_markup=build_timeframes_reply_kb())
+                except Exception:
+                    try:
+                        bot.send_message(m.chat.id, base_text, reply_markup=build_timeframes_reply_kb())
+                    except Exception:
+                        pass
+            threading.Thread(target=_compute_and_edit, daemon=True).start()
+            return
             _src = quota.get('source')
             _src_label = 'Daily plan' if _src == 'daily' else ('Credit pack' if _src == 'credit' else 'Free sample')
             _left = max(quota.get('daily_limit',0)-quota.get('used_today',0),0)
@@ -2637,6 +2712,13 @@ if bot:
             SIGNAL_LAST[uid] = asset_code
             _send_kb_quietly(call.message.chat.id, build_timeframes_reply_kb())
             bot.send_message(call.message.chat.id, f"Choose timeframe for {asset_code}:")
+            # Warm caches for this pair to speed up TF selection
+            try:
+                code2 = asset_code[:-4] if asset_code.endswith("_OTC") else asset_code
+                pair = (f"{code2[:3]}/{code2[3:]}" if len(code2) == 6 else code2)
+                threading.Thread(target=_warm_pair_cache, args=(pair,), daemon=True).start()
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -2710,14 +2792,142 @@ if bot:
             # Mark free sample as used
             FREE_SAMPLES[uid] = datetime.now(timezone.utc).date().isoformat()
             quota = {"ok": True, "source": "free", "used_today": 1, "daily_limit": 1, "credits": 0}
-        stop_loading_tf = start_chat_action(call.message.chat.id, "typing")
+        # Send instant placeholder then compute and edit
         try:
-            text = utils.generate_ensemble_signal(pair, tf)
-        finally:
+            bot.answer_callback_query(call.id)
+        except Exception:
+            pass
+        placeholder = f"Analyzing {pair} · TF: {tf}\nPlease wait…"
+        try:
+            base_msg = bot.send_message(call.message.chat.id, placeholder, reply_markup=build_signal_nav_kb(asset_code))
+        except Exception:
+            base_msg = None
+        def _compute_and_edit2():
+            stop_loading_tf = start_chat_action(call.message.chat.id, "typing")
             try:
-                stop_loading_tf()
+                text = utils.generate_ensemble_signal(pair, tf)
+            finally:
+                try:
+                    stop_loading_tf()
+                except Exception:
+                    pass
+            _src = quota.get('source')
+            _src_label = 'Daily plan' if _src == 'daily' else ('Credit pack' if _src == 'credit' else 'Free sample')
+            _left = max(quota.get('daily_limit',0)-quota.get('used_today',0),0)
+            _credits = quota.get('credits',0)
+            footer = (
+                "\n— Account —\n"
+                f"• Daily signals left: {_left}\n"
+                f"• Credit balance: {_credits}\n"
+                f"• Access type: {_src_label}"
+            )
+            def _fmt2(v):
+                if v is None:
+                    return "-"
+                v = float(v)
+                if v >= 100: return f"{v:.2f}"
+                if v >= 1: return f"{v:.4f}"
+                return f"{v:.6f}"
+            entry_price_now = None
+            try:
+                entry_price_now = utils.get_entry_price(pair, tf)
+                if entry_price_now is None:
+                    for alt in ("1m", "5m", "3m"):
+                        entry_price_now = utils.get_entry_price(pair, alt)
+                        if entry_price_now is not None:
+                            break
+                if entry_price_now is None:
+                    entry_price_now = utils.get_close_at_time(pair, tf, datetime.now(timezone.utc).isoformat())
             except Exception:
-                pass
+                entry_price_now = None
+            base_text = text + f"\nEntry price: <code>{_fmt2(entry_price_now)}</code>" + "\n" + footer
+            # Send or edit message with final content
+            try:
+                if base_msg is not None:
+                    bot.edit_message_text(base_text, call.message.chat.id, getattr(base_msg, 'message_id', None), reply_markup=build_signal_nav_kb(asset_code), parse_mode=None)
+                else:
+                    bot.send_message(call.message.chat.id, base_text, reply_markup=build_signal_nav_kb(asset_code))
+            except Exception:
+                try:
+                    bot.send_message(call.message.chat.id, base_text, reply_markup=build_signal_nav_kb(asset_code))
+                except Exception:
+                    pass
+            # Continue with logging and scheduled updates in a separate thread as before
+            direction = utils.direction_from_signal_text(text) or ""
+            def _after_send2():
+                try:
+                    entry_time_iso = datetime.now(timezone.utc).isoformat()
+                    entry_price = utils.get_entry_price(pair, tf)
+                    if entry_price is None:
+                        for alt in ("1m", "5m", "3m"):
+                            try:
+                                entry_price = utils.get_entry_price(pair, alt)
+                                if entry_price is not None:
+                                    break
+                            except Exception:
+                                pass
+                    if entry_price is None:
+                        try:
+                            entry_price = utils.get_close_at_time(pair, tf, entry_time_iso)
+                        except Exception:
+                            entry_price = None
+                    # Log served signal
+                    try:
+                        urow = db.get_user_by_telegram_id(uid) or (
+                            db.upsert_user(uid, call.from_user.username or "", call.from_user.first_name or "", call.from_user.last_name or "", call.from_user.language_code or None) or 
+                            db.get_user_by_telegram_id(uid)
+                        )
+                        if urow and hasattr(db, 'insert_signal_log'):
+                            db.insert_signal_log(
+                                user_id=urow.get('id'),
+                                telegram_id=uid,
+                                pair=pair,
+                                timeframe=tf,
+                                direction=direction,
+                                entry_price=entry_price,
+                                source=quota.get('source'),
+                                message_id=(getattr(base_msg, 'message_id', None) if base_msg is not None else None),
+                                raw_text=text,
+                                entry_time=entry_time_iso
+                            )
+                    except Exception:
+                        pass
+                    # Schedule updates only for real trades
+                    try:
+                        if direction in ("UP", "DOWN"):
+                            for tf_label, delay in [("1m", 55), ("3m", 175), ("5m", 295)]:
+                                def _post_update2(tf_label=tf_label, entry_price=entry_price):
+                                    try:
+                                        now_iso = datetime.now(timezone.utc).isoformat()
+                                        new_price = utils.get_entry_price(pair, tf_label)
+                                        if new_price is None:
+                                            for alt in ("1m", "5m"):
+                                                new_price = utils.get_entry_price(pair, alt)
+                                                if new_price is not None:
+                                                    break
+                                        if new_price is None:
+                                            new_price = utils.get_close_at_time(pair, tf_label, now_iso)
+                                        if entry_price is not None and new_price is not None and entry_price:
+                                            ch = (float(new_price) - float(entry_price)) / float(entry_price) * 100.0
+                                            delta = f"{ch:+.2f}%"
+                                        else:
+                                            delta = "-"
+                                        upd = (
+                                            f"⏱ {tf_label} update for {pair}\n"
+                                            f"Entry: <code>{_fmt2(entry_price)}</code> → Now: <code>{_fmt2(new_price)}</code>\n"
+                                            f"Change: {delta}"
+                                        )
+                                        bot.send_message(call.message.chat.id, upd, reply_markup=build_signal_nav_kb(asset_code))
+                                    except Exception:
+                                        pass
+                                threading.Timer(delay, _post_update2).start()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            threading.Thread(target=_after_send2, daemon=True).start()
+        threading.Thread(target=_compute_and_edit2, daemon=True).start()
+        return
         _src = quota.get('source')
         _src_label = 'Daily plan' if _src == 'daily' else ('Credit pack' if _src == 'credit' else 'Free sample')
         _left = max(quota.get('daily_limit',0)-quota.get('used_today',0),0)

@@ -6,6 +6,8 @@ from datetime import datetime, timezone, time, timedelta
 from typing import Optional, Dict, Any, List, Tuple
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from html import escape as html_escape
 from zoneinfo import ZoneInfo
 
@@ -62,6 +64,22 @@ def _cache_set(key: str, val, ttl_sec: int = 4):
     except Exception:
         pass
 
+_RETRY = Retry(total=3, connect=3, read=3, backoff_factor=0.6, status_forcelist=[429, 500, 502, 503, 504], allowed_methods=frozenset(["GET", "POST"]))
+_HTTP = requests.Session()
+_HTTP.mount("https://", HTTPAdapter(max_retries=_RETRY, pool_connections=10, pool_maxsize=10))
+_HTTP.mount("http://", HTTPAdapter(max_retries=_RETRY, pool_connections=10, pool_maxsize=10))
+
+def safe_request(method: str, url: str, headers: Optional[dict] = None, timeout=10):
+    try:
+        return _HTTP.request(method.upper(), url, headers=headers, timeout=timeout)
+    except Exception:
+        try:
+            h = dict(headers or {})
+            h["Connection"] = "close"
+            return requests.request(method.upper(), url, headers=h, timeout=timeout)
+        except Exception:
+            return None
+
 def verify_transaction(tx_hash: str) -> Dict[str, Any]:
     res = {"network": None, "found": False, "success": False}
     timeout = (5, 10)
@@ -71,7 +89,7 @@ def verify_transaction(tx_hash: str) -> Dict[str, Any]:
         tg_key = os.getenv("TRONGRID_API_KEY", "").strip()
         if tg_key and len(tx_hash) >= 64:
             headers = {"TRON-PRO-API-KEY": tg_key}
-            r = requests.get(f"https://api.trongrid.io/v1/transactions/{tx_hash}", headers=headers, timeout=timeout)
+            r = safe_request("GET", f"https://api.trongrid.io/v1/transactions/{tx_hash}", headers=headers, timeout=timeout)
             if r.ok:
                 data = r.json()
                 items = data.get("data") or []
@@ -90,7 +108,7 @@ def verify_transaction(tx_hash: str) -> Dict[str, Any]:
             if not key:
                 return None
             u = f"{api}?module=transaction&action=gettxreceiptstatus&txhash={tx_hash}&apikey={key}"
-            r = requests.get(u, timeout=timeout)
+            r = safe_request("GET", u, timeout=timeout)
             if r.ok:
                 j = r.json()
                 status = (j.get("result") or {}).get("status")
@@ -228,6 +246,67 @@ def _next_weekday(dt: datetime, weekday: int) -> datetime:
     if days_ahead == 0:
         days_ahead = 7
     return dt + timedelta(days=days_ahead)
+
+# ----- IST sessions and per-pair active windows -----
+IST_TZ = ZoneInfo("Asia/Kolkata")
+
+# Sessions (approx.) like your image — IST
+SESSIONS_IST: list[tuple[str, time, time, list[str]]] = [
+    ("Sydney", time(3, 30), time(12, 30), ["AUD/USD", "NZD/USD"]),
+    ("Tokyo", time(5, 30), time(14, 30), ["USD/JPY", "AUD/USD"]),
+    ("London", time(13, 30), time(22, 30), ["EUR/USD", "GBP/USD", "USD/CHF"]),
+    ("New York", time(18, 30), time(3, 30), ["USD/CAD", "EUR/USD", "GBP/USD"]),
+]
+
+# Per-pair most-active windows (IST) — from your image
+FX_PAIR_WINDOWS_IST: dict[str, tuple[time, time]] = {
+    "EUR/USD": (time(13, 30), time(22, 30)),
+    "USD/JPY": (time(5, 30), time(14, 30)),
+    "GBP/USD": (time(13, 30), time(22, 30)),
+    "AUD/USD": (time(5, 30), time(12, 30)),
+    "USD/CHF": (time(13, 30), time(22, 30)),
+    "USD/CAD": (time(18, 30), time(3, 30)),  # crosses midnight
+    "NZD/USD": (time(4, 30), time(11, 30)),
+}
+
+def _ist_in_window(now_utc: datetime, start: time, end: time) -> bool:
+    now_ist = now_utc.astimezone(IST_TZ)
+    t = now_ist.time()
+    if start <= end:
+        return start <= t < end
+    # Overnight window
+    return t >= start or t < end
+
+def is_pair_active_now(pair: str, now_utc: Optional[datetime] = None) -> bool:
+    """Return True if pair is in its IST most-active window and FX is open (24x5)."""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    if _classify_asset(pair) != "forex":
+        return _market_open_for_asset(pair, now_utc)
+    window = FX_PAIR_WINDOWS_IST.get((pair or "").upper())
+    if not window:
+        return _market_open_for_asset(pair, now_utc)
+    if not _market_open_for_asset(pair, now_utc):
+        return False
+    return _ist_in_window(now_utc, window[0], window[1])
+
+def next_active_for_pair(pair: str, now_utc: Optional[datetime] = None) -> Optional[datetime]:
+    """Next start of the pair's IST active window (UTC), honoring FX 24x5."""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    if _classify_asset(pair) != "forex":
+        return next_open_for_asset(pair, now_utc)
+    window = FX_PAIR_WINDOWS_IST.get((pair or "").upper())
+    if not window:
+        return next_open_for_asset(pair, now_utc)
+    now_ist = now_utc.astimezone(IST_TZ)
+    for dd in range(0, 8):
+        day = (now_ist + timedelta(days=dd)).date()
+        start_dt_ist = datetime.combine(day, window[0], tzinfo=IST_TZ)
+        start_dt_utc = start_dt_ist.astimezone(timezone.utc)
+        if start_dt_utc <= now_utc:
+            continue
+        if _market_open_for_asset(pair, start_dt_utc):
+            return start_dt_utc
+    return None
 
 
 def market_hours_message() -> str:
@@ -375,61 +454,57 @@ def market_hours_message_for_pairs(pairs: list[str]) -> str:
     now_utc = datetime.now(timezone.utc)
     now_disp = now_utc.astimezone(disp_tz)
 
-    # FX open/close helpers (24x5) UTC
-    def fx_is_open(t: datetime) -> bool:
-        wd = t.weekday(); h = t.hour
-        if wd in (0,1,2,3):
-            return True
-        if wd == 4:
-            return h < 21
-        if wd == 6:
-            return h >= 21
-        return False
-
-    def fx_next_open_close(t: datetime) -> dict:
-        if fx_is_open(t):
-            days_to_fri = (4 - t.weekday()) % 7
-            close_day = (t + timedelta(days=days_to_fri)).date()
-            close_dt = datetime.combine(close_day, time(21, 0), tzinfo=timezone.utc)
-            if close_dt <= t:
-                close_dt += timedelta(days=7)
-            return {"open": None, "close": close_dt}
-        days_to_sun = (6 - t.weekday()) % 7
-        open_day = (t + timedelta(days=days_to_sun)).date()
-        open_dt = datetime.combine(open_day, time(21, 0), tzinfo=timezone.utc)
-        if open_dt <= t:
-            open_dt += timedelta(days=7)
-        return {"open": open_dt, "close": None}
-
-    fx_open = fx_is_open(now_utc)
-    fx_times = fx_next_open_close(now_utc)
+    # Headline 24x5 status
+    fx_open = _market_open_for_asset("EUR/USD", now_utc)
+    fx_next = next_open_for_asset("EUR/USD", now_utc)
     fx_header = (
-        f"LIVE FX — OPEN (24x5) · Next close: {_fmt(fx_times['close'], disp_tz)}"
-        if fx_open else
-        f"LIVE FX — CLOSED (Weekend) · Next open: {_fmt(fx_times['open'], disp_tz)}"
+        "LIVE FX — OPEN (24x5)"
+        if fx_open else f"LIVE FX — CLOSED (Weekend) · Next open: {_fmt(fx_next, disp_tz)}"
     )
 
+    # Sessions (IST)
+    def fmt_clock(ti: time) -> str:
+        base = datetime.now(IST_TZ).replace(hour=ti.hour, minute=ti.minute, second=0, microsecond=0)
+        return base.strftime("%I:%M %p")
+
+    sessions_lines = [
+        f"{name}: {fmt_clock(st)} – {fmt_clock(en)} IST  ·  {', '.join(pairs)}"
+        for (name, st, en, pairs) in SESSIONS_IST
+    ]
+
+    # Pair windows (IST)
     pairs = [p for p in pairs or [] if "/" in (p or "")]  # only valid
+    pair_lines = [
+        f"{p}: {fmt_clock(FX_PAIR_WINDOWS_IST[p.upper()][0])} – {fmt_clock(FX_PAIR_WINDOWS_IST[p.upper()][1])} IST"
+        for p in pairs if p.upper() in FX_PAIR_WINDOWS_IST
+    ]
+
+    # Live vs closed by active windows
     open_pairs: list[str] = []
-    closed_pairs: list[tuple[str, str]] = []  # (pair, next_open_str)
+    closed_pairs: list[tuple[str, str]] = []
     for p in pairs:
-        is_open = _market_open_for_asset(p, now_utc)
-        if is_open:
+        if is_pair_active_now(p, now_utc):
             open_pairs.append(p)
         else:
-            nxt_dt = next_open_for_asset(p, now_utc)
-            nxt_str = _fmt(nxt_dt, disp_tz) if nxt_dt else "Unknown"
+            nxt_dt = next_active_for_pair(p, now_utc)
+            nxt_str = _fmt(nxt_dt, IST_TZ) if nxt_dt else "Unknown"
             closed_pairs.append((p, nxt_str))
 
     lines = [
         f"🕒 Now: {now_disp.strftime('%Y-%m-%d %H:%M %Z')}",
         fx_header,
         "",
+        "Sessions (IST):",
+        *sessions_lines,
+        "",
+        "Pairs (IST):",
+        *pair_lines,
+        "",
         "LIVE now:",
         *( [f"• {p}" for p in open_pairs] if open_pairs else ["• None"] ),
         "",
         "CLOSED now:",
-        *( [f"• {p} — Next open: {n}" for (p, n) in closed_pairs] if closed_pairs else ["• None"] ),
+        *( [f"• {p} — Next active: {n}" for (p, n) in closed_pairs] if closed_pairs else ["• None"] ),
     ]
     return "\n".join(lines)
 
@@ -1309,7 +1384,7 @@ def fetch_ohlc_finnhub(pair: str, timeframe: str, limit: int = 200):
         url = f"{base}/forex/candle?symbol={symbol}&resolution={res}&from={frm}&to={now}&token={key}"
     else:
         url = f"{base}/stock/candle?symbol={symbol}&resolution={res}&from={frm}&to={now}&token={key}"
-    r = requests.get(url, timeout=5)
+    r = safe_request("GET", url, timeout=5)
     if r.status_code != 200:
         return None
     j = r.json()
@@ -1342,7 +1417,7 @@ def fetch_klines_finnhub(pair: str, timeframe: str, limit: int = 200) -> Optiona
     else:
         url = f"{base}/stock/candle?symbol={symbol}&resolution={res}&from={frm}&to={now}&token={key}"
     try:
-        r = requests.get(url, timeout=5)
+        r = safe_request("GET", url, timeout=5)
         if r.status_code != 200:
             return None
         j = r.json()
@@ -1376,7 +1451,7 @@ def fetch_ohlc_twelvedata(pair: str, timeframe: str, limit: int = 200):
     url = (
         f"https://api.twelvedata.com/time_series?symbol={sym}&interval={interval}&outputsize={limit}&apikey={key}&format=JSON&dp=6"
     )
-    r = requests.get(url, timeout=8)
+    r = safe_request("GET", url, timeout=8)
     if r.status_code != 200:
         return None
     j = r.json()
@@ -1409,7 +1484,7 @@ def fetch_ohlc_alphavantage(pair: str, timeframe: str, limit: int = 200):
     else:
         url = f"{base}?function=TIME_SERIES_INTRADAY&symbol={m['symbol']}&interval={interval}&apikey={key}"
         key_name = f"Time Series ({interval})"
-    r = requests.get(url, timeout=8)
+    r = safe_request("GET", url, timeout=8)
     if r.status_code != 200:
         return None
     j = r.json()
@@ -1577,7 +1652,7 @@ def fetch_ohlc_binance(symbol: str, timeframe: str, limit: int = 300) -> Optiona
     try:
         interval = timeframe
         url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={min(max(limit,1),1000)}"
-        r = requests.get(url, timeout=10)
+        r = safe_request("GET", url, timeout=10)
         if r.status_code != 200:
             return None
         data = r.json()
@@ -1589,7 +1664,7 @@ def fetch_ohlc_binance(symbol: str, timeframe: str, limit: int = 300) -> Optiona
 def fetch_klines_binance(symbol: str, timeframe: str, limit: int = 300) -> Optional[List[list]]:
     try:
         url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={timeframe}&limit={min(max(limit,1),1000)}"
-        r = requests.get(url, timeout=5)
+        r = safe_request("GET", url, timeout=5)
         if r.status_code != 200:
             return None
         data = r.json()

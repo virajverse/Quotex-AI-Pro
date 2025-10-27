@@ -923,11 +923,7 @@ if bot:
 
     # --- Assets: OTC vs LIVE (user-provided FX list) ---
     PAIRS_BASE = [
-        "USD/COP","USD/INR","USD/ARS","USD/BDT","USD/DZD","USD/BRL","GBP/USD","EUR/GBP","NZD/CAD",
-        "USD/EGP","EUR/NZD","USD/IDR","CHF/JPY","USD/MXN","EUR/AUD","AUD/JPY","CAD/CHF","USD/CAD",
-        "AUD/CAD","EUR/CHF","AUD/NZD","USD/NGN","NZD/JPY","AUD/USD","EUR/CAD","EUR/JPY","EUR/USD",
-        "GBP/AUD","GBP/JPY","NZD/CHF","USD/CHF","USD/JPY","USD/PKR","USD/TRY","NZD/USD","USD/PHP",
-        "CAD/JPY","GBP/CAD","USD/ZAR","EUR/SGD","GBP/CHF","GBP/NZD",
+        "EUR/USD", "USD/JPY", "GBP/USD", "AUD/USD", "USD/CHF", "USD/CAD", "NZD/USD",
     ]
 
     def build_assets_kb():
@@ -1211,7 +1207,7 @@ if bot:
         pairs = PAIRS_BASE[:]
         if category == "live":
             try:
-                pairs = [p for p in pairs if utils._market_open_for_asset(p)]
+                pairs = [p for p in pairs if utils.is_pair_active_now(p)]
             except Exception:
                 pass
         return pairs
@@ -2134,12 +2130,13 @@ if bot:
                 pass
 
         asset_map = {
-            "btc/usdt": "BTCUSDT",
-            "eth/usdt": "ETHUSDT",
             "eur/usd": "EURUSD",
-            "gbp/jpy": "GBPJPY",
-            "gold": "GOLD",
-            "nasdaq": "NASDAQ",
+            "usd/jpy": "USDJPY",
+            "gbp/usd": "GBPUSD",
+            "aud/usd": "AUDUSD",
+            "usd/chf": "USDCHF",
+            "usd/cad": "USDCAD",
+            "nzd/usd": "NZDUSD",
         }
         if txt in asset_map:
             SIGNAL_LAST[m.from_user.id] = asset_map[txt]
@@ -2166,14 +2163,14 @@ if bot:
                 pair = code_to_pair.get(code, code)
             # Check market status before consuming quota
             try:
-                open_now = utils._market_open_for_asset(pair)
+                active_now = utils.is_pair_active_now(pair)
             except Exception:
-                open_now = True
-            if not open_now:
+                active_now = True
+            if not active_now:
                 try:
-                    nxt = utils.next_open_for_asset(pair)
-                    when = utils.format_ts_iso(nxt) if nxt else "-"
-                    bot.send_message(m.chat.id, f"Market closed for {pair}. Next open: <b>{when}</b>")
+                    nxt = utils.next_active_for_pair(pair)
+                    when = utils._fmt(nxt, utils.IST_TZ) if nxt else "-"
+                    bot.send_message(m.chat.id, f"Market inactive for {pair}. Next active: <b>{when}</b>")
                 except Exception:
                     pass
                 return

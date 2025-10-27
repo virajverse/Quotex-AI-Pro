@@ -2265,6 +2265,21 @@ if bot:
         except Exception:
             pass
 
+    @bot.callback_query_handler(func=lambda c: c.data == "chk:joined")
+    def on_check_joined(call: types.CallbackQuery):
+        uid = call.from_user.id
+        ok = _is_channel_member(uid)
+        try:
+            bot.answer_callback_query(call.id, "Verified ✅" if ok else "Not joined yet ❌")
+        except Exception:
+            pass
+        if ok:
+            try:
+                urow = db.get_user_by_telegram_id(uid)
+                bot.send_message(call.message.chat.id, "Thanks for joining! Choose an option:", reply_markup=build_main_reply_kb(urow))
+            except Exception:
+                pass
+
     @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("pay:"))
     def on_pay_click(call: types.CallbackQuery):
         action = call.data.split(":", 1)[1]

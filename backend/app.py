@@ -11,6 +11,8 @@ from werkzeug.utils import secure_filename
 import shutil
 import io
 import tempfile
+import random
+import time
 
 import telebot
 from telebot import types
@@ -58,6 +60,12 @@ SECRET_KEY = os.getenv("SECRET_KEY", "").strip()
 SUPPORT_CONTACT = os.getenv("SUPPORT_CONTACT", "@support").strip()
 REQUIRED_CHANNEL_URL = os.getenv("REQUIRED_CHANNEL_URL", "https://t.me/QuotexAI_Pro").strip()
 REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "").strip()
+# Channel broadcaster configuration
+SIGNAL_CHANNEL = os.getenv("SIGNAL_CHANNEL", "").strip()  # e.g., -1001234567890 or @YourChannel
+SIGNALS_PER_DAY = int(os.getenv("SIGNALS_PER_DAY", "20"))
+SIGNAL_CONFIDENCE_MIN = int(os.getenv("SIGNAL_CONFIDENCE_MIN", "5"))  # 1..5; 5 ~ highest
+BROADCAST_INTERVAL_SEC = int(os.getenv("BROADCAST_INTERVAL_SEC", "120"))
+BROADCAST_ASSETS = [p.strip() for p in (os.getenv("BROADCAST_ASSETS", "EUR/USD,GBP/JPY,GBP/USD,EUR/GBP,USD/JPY").split(",")) if p.strip()]
 
 # Session secret key for Admin Panel
 if SECRET_KEY:
@@ -1233,6 +1241,105 @@ if bot:
         title = "Select OTC asset:" if category == "otc" else "Select LIVE asset:"
         try:
             bot.send_message(chat_id, title)
+        except Exception:
+            pass
+
+    # ----- High-confidence channel broadcaster -----
+    def _broadcast_target_id():
+        tgt = SIGNAL_CHANNEL
+        if not tgt:
+            return None
+        t = tgt.strip()
+        if t.startswith("@"):
+            return t  # Telegram allows @username as chat_id
+        try:
+            return int(t)
+        except Exception:
+            return t
+
+    def _daily_key() -> str:
+        return f"chan_sent:{datetime.now(timezone.utc).date().isoformat()}"
+
+    def _daily_count() -> int:
+        try:
+            v = db.get_setting(_daily_key())
+            return int(v or 0)
+        except Exception:
+            return 0
+
+    def _bump_daily_count():
+        try:
+            db.set_setting(_daily_key(), str(_daily_count() + 1))
+        except Exception:
+            pass
+
+    def _is_high_conf(pair: str) -> Optional[dict]:
+        try:
+            mtf = utils._fetch_mtf(pair)
+            agg = utils._aggregate_scores(mtf)
+            if not agg or not agg.get("ok"):
+                return None
+            conf = int(agg.get("confidence", 0))
+            if conf < SIGNAL_CONFIDENCE_MIN:
+                return None
+            # Extra gate: avoid if market closed
+            if not utils._market_open_for_asset(pair):
+                return None
+            return {"dir": agg.get("dir"), "confidence": conf, "reasons": agg.get("reasons", [])}
+        except Exception:
+            return None
+
+    def _build_channel_signal(pair: str, info: dict) -> str:
+        d = (info.get("dir") or "").upper()
+        emoji = "📈" if d == "UP" else ("📉" if d == "DOWN" else "⏳")
+        conf = int(info.get("confidence", 0))
+        reasons = ", ".join(info.get("reasons", [])[:3]) or ("MTF confluence" if d else "No-trade")
+        return (
+            f"{pair}\n"
+            f"{emoji} Direction: {d or 'NO-TRADE'}\n"
+            f"💡 Confidence: {conf}/5\n"
+            f"Reason: {reasons}.\n"
+            f"⚠️ This is not financial advice."
+        )
+
+    def _channel_broadcaster():
+        tgt = _broadcast_target_id()
+        if not (bot and tgt):
+            return
+        # Small stagger to avoid startup bursts
+        time.sleep(5)
+        while True:
+            try:
+                # Reset daily counter automatically by key change
+                if _daily_count() >= max(0, SIGNALS_PER_DAY):
+                    time.sleep(300)
+                    continue
+                # Choose candidate pairs
+                pairs = [p for p in BROADCAST_ASSETS if "/" in p]
+                random.shuffle(pairs)
+                sent = False
+                for pair in pairs:
+                    info = _is_high_conf(pair)
+                    if not info:
+                        continue
+                    text = _build_channel_signal(pair, info)
+                    try:
+                        bot.send_message(tgt, text)
+                        _bump_daily_count()
+                        sent = True
+                        break
+                    except Exception:
+                        # If channel post fails, stop trying this cycle
+                        break
+                # Sleep between attempts
+                time.sleep(max(30, BROADCAST_INTERVAL_SEC if sent else BROADCAST_INTERVAL_SEC // 2))
+            except Exception:
+                time.sleep(60)
+
+    # Start broadcaster if configured
+    if SIGNAL_CHANNEL:
+        try:
+            threading.Thread(target=_channel_broadcaster, name="channel-broadcaster", daemon=True).start()
         except Exception:
             pass
 

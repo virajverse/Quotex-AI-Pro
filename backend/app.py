@@ -152,13 +152,11 @@ if bot:
         return False
 
 if BOT_TOKEN:
-    @app.post(f"/bot/{BOT_TOKEN}")
-    def telegram_webhook():
+    def _handle_webhook_request():
         try:
-            payload = request.get_data().decode("utf-8")
-            data = json.loads(payload or "{}")
+            data = request.get_json(silent=True) or json.loads(request.get_data().decode("utf-8") or "{}")
         except Exception:
-            return ("", 400)
+            data = {}
         try:
             update = types.Update.de_json(data)
             if bot:
@@ -169,6 +167,21 @@ if BOT_TOKEN:
             except Exception:
                 pass
         return ("OK", 200)
+
+    # Register a fixed path for the current token with a UNIQUE endpoint
+    _fixed_endpoint = f"telegram_webhook_{BOT_TOKEN}"
+    if _fixed_endpoint not in app.view_functions:
+        @app.post(f"/bot/{BOT_TOKEN}", endpoint=_fixed_endpoint)
+        def telegram_webhook_fixed():
+            return _handle_webhook_request()
+
+    # Also register a guarded dynamic route if not already present in the app
+    if "telegram_webhook_any" not in app.view_functions and "telegram_webhook" not in app.view_functions:
+        @app.route("/bot/<token>", methods=["POST"], endpoint="telegram_webhook_any")
+        def telegram_webhook_any(token):
+            if not BOT_TOKEN or token != BOT_TOKEN:
+                return ("", 403)
+            return _handle_webhook_request()
 
 @app.get("/favicon.ico")
 @app.get("/favicon.png")

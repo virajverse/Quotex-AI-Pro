@@ -144,6 +144,11 @@ if bot:
             bot.send_message(chat_id, "📢 Please join our channel to use this bot:", reply_markup=_build_join_kb())
         except Exception:
             pass
+        # Also place a reply keyboard below chat with a text-based confirmation
+        try:
+            _send_kb_quietly(chat_id, build_join_reply_kb())
+        except Exception:
+            pass
         return False
 
 if BOT_TOKEN:
@@ -960,6 +965,11 @@ if bot:
         )
         return kb
 
+    def build_join_reply_kb():
+        kb = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True)
+        kb.add(types.KeyboardButton("✅ I've Joined"))
+        return kb
+
     def build_main_reply_kb(user):
         kb = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True, one_time_keyboard=False, selective=False)
         premium = _user_has_premium(user)
@@ -1641,6 +1651,23 @@ if bot:
 
     @bot.message_handler(func=lambda m: True, content_types=["text"])
     def on_text(m: types.Message):
+        txt0 = (m.text or "").strip()
+        txt = txt0.lower()
+        # Allow text-based confirmation from reply keyboard even before passing the gate
+        if "i've joined" in txt or "ive joined" in txt or "i have joined" in txt or txt == "joined":
+            if _is_channel_member(m.from_user.id):
+                try:
+                    urow = db.get_user_by_telegram_id(m.from_user.id)
+                    bot.send_message(m.chat.id, "Thanks for joining! Choose an option:", reply_markup=build_main_reply_kb(urow))
+                except Exception:
+                    pass
+            else:
+                try:
+                    bot.send_message(m.chat.id, "Not joined yet ❌")
+                except Exception:
+                    pass
+                _require_channel(m.chat.id, m.from_user.id)
+            return
         if not _require_channel(m.chat.id, m.from_user.id):
             return
         try:

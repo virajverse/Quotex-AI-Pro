@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<h2 class="section-title">Branding</h2>
+
+<div class="card" style="max-width:840px">
+  <p class="muted">Upload your favicon and Apple touch icon. Supported: <b>.ico</b> or <b>.png</b> for favicon, and <b>.png</b> for Apple touch.</p>
+  <form method="post" action="/admin/branding" enctype="multipart/form-data">
+    <div class="row">
+      <div class="col">
+        <h3>Favicon</h3>
+        <p class="muted">Shown in browser tabs. Prefer square 256×256 PNG or a .ico file.</p>
+        <input type="file" name="favicon" accept="image/png,image/x-icon">
+        {% if has_favicon %}<div class="muted" style="margin-top:6px">Current favicon is set.</div>{% endif %}
+      </div>
+      <div class="col">
+        <h3>Apple Touch Icon</h3>
+        <p class="muted">Used when users pin your site to iOS home screen (PNG only).</p>
+        <input type="file" name="apple_touch" accept="image/png">
+        {% if has_touch %}<div class="muted" style="margin-top:6px">Current touch icon is set.</div>{% endif %}
+      </div>
+    </div>
+    <div style="margin-top:12px">
+      <button class="btn ok" type="submit">Save</button>
+    </div>
+    <div class="muted" style="margin-top:8px">If touch icon is not provided, it will be copied from favicon.png automatically.</div>
+  </form>
+</div>
+{% endblock %}

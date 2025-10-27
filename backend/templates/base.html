@@ -70,35 +70,78 @@
     .section-title{margin:6px 0 10px 0; font-weight:700; letter-spacing:.5px}
     .chart-row{display:grid; grid-template-columns:repeat(2, minmax(280px,1fr)); gap:14px}
     @media (max-width: 900px){ .chart-row{grid-template-columns:1fr} }
+
+    /* New layout */
+    .layout{display:grid; grid-template-columns:240px 1fr; min-height:100vh; background:linear-gradient(180deg,#f3f6ff,#eef2ff)}
+    .sidebar{
+      padding:20px 14px; border-right:1px solid var(--edge);
+      background:linear-gradient(180deg,#ebf1ff,#e9edff);
+    }
+    .brand{font-weight:800; letter-spacing:.6px; font-size:18px; margin:6px 6px 14px 6px}
+    .side-nav{display:flex; flex-direction:column; gap:8px}
+    .side-nav a{
+      display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:12px;
+      color:var(--text); background:transparent; border:1px solid transparent;
+    }
+    .side-nav a:hover{background:#eef4ff; border-color:#dce6f9; box-shadow:0 0 0 1px var(--glow) inset}
+    .side-nav a.active{
+      background:linear-gradient(180deg,#8bb4ff,#5f8cff);
+      color:#fff; border-color:#5f8cff; box-shadow:0 6px 14px rgba(95,140,255,.25)
+    }
+    .main{padding:24px}
+    .topbar{
+      display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px;
+      background:linear-gradient(180deg,#ffffff,#f7f9fe); border:1px solid var(--edge); border-radius:16px; padding:10px 12px;
+      box-shadow:0 8px 18px rgba(0,0,0,.06), inset 0 0 0 1px var(--glow);
+    }
+    .search{flex:1; display:flex}
+    .search input{width:100%; padding:10px 12px; border:1px solid #d9e2f2; border-radius:10px; background:#f9fbff}
+    .top-actions{display:flex; align-items:center; gap:10px}
+    .btn.primary{background:linear-gradient(180deg,#8bb4ff,#5f8cff); color:#fff; border-color:#5f8cff}
+    .avatar{width:34px; height:34px; border-radius:50%; background:#e6edff; display:flex; align-items:center; justify-content:center; font-weight:700}
   </style>
   <link rel="icon" type="image/png" href="/favicon.png">
   <link rel="icon" href="/favicon.ico">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 </head>
 <body>
-  <div class="container">
-    <header>
-      <div><strong>Admin Panel</strong></div>
-      <nav>
-        <a href="/admin/">Dashboard</a>
-        <a href="/admin/users">Users</a>
-        <a href="/admin/verifications">Verifications</a>
-        <a href="/admin/orders">Orders</a>
-        <a href="/admin/broadcast">Broadcast</a>
-        <a href="/admin/branding">Branding</a>
-        <a href="/admin/logout">Logout</a>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">Admin</div>
+      {% set p = request.path %}
+      <nav class="side-nav">
+        <a class="{{ 'active' if p.startswith('/admin/') and p == '/admin/' else '' }}" href="/admin/">🏠 Dashboard</a>
+        <a class="{{ 'active' if p.startswith('/admin/users') else '' }}" href="/admin/users">👤 Users</a>
+        <a class="{{ 'active' if p.startswith('/admin/verifications') or p.startswith('/admin/verification') else '' }}" href="/admin/verifications">✅ Verifications</a>
+        <a class="{{ 'active' if p.startswith('/admin/orders') else '' }}" href="/admin/orders">🧾 Orders</a>
+        <a class="{{ 'active' if p.startswith('/admin/broadcast') else '' }}" href="/admin/broadcast">📢 Broadcast</a>
+        <a class="{{ 'active' if p.startswith('/admin/branding') else '' }}" href="/admin/branding">🖼 Branding</a>
+        <a href="/admin/logout">↩️ Logout</a>
       </nav>
-    </header>
+    </aside>
+    <main class="main">
+      <div class="topbar">
+        <form class="search" action="/admin/users" method="get">
+          <input type="text" name="q" placeholder="Search users...">
+        </form>
+        <div class="top-actions">
+          <a class="btn primary" href="/admin/db/download">Download DB</a>
+          <a class="btn" href="/admin/#db-upload">Upload</a>
+          <div class="avatar">A</div>
+        </div>
+      </div>
+      <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            {% for category, message in messages %}
+              <div class="flash {{category}}">{{ message }}</div>
+            {% endfor %}
+          {% endif %}
+        {% endwith %}
 
-    {% with messages = get_flashed_messages(with_categories=true) %}
-      {% if messages %}
-        {% for category, message in messages %}
-          <div class="flash {{category}}">{{ message }}</div>
-        {% endfor %}
-      {% endif %}
-    {% endwith %}
-
-    {% block content %}{% endblock %}
+        {% block content %}{% endblock %}
+      </div>
+    </main>
   </div>
   {% block scripts %}{% endblock %}
 </body>

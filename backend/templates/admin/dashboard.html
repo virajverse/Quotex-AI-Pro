@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h2 class="section-title">Dashboard</h2>
+
 <div class="metric-grid">
   <div class="metric">
     <div class="label">Total Users</div>
@@ -20,25 +21,27 @@
   </div>
 </div>
 
-<div class="card">
-  <h3>Cron</h3>
-  <form action="/admin/cron" method="post">
-    <button class="btn ok" type="submit">Run cron now</button>
-    <span class="muted">(idempotent)</span>
-  </form>
+<div class="row">
+  <div class="col">
+    <div class="card">
+      <h3>Cron</h3>
+      <form action="/admin/cron" method="post">
+        <button class="btn ok" type="submit">Run cron now</button>
+        <span class="muted">(idempotent)</span>
+      </form>
+    </div>
+  </div>
+  <div class="col">
+    <div class="card">
+      <h3>Performance</h3>
+      <p class="muted">View last 24h accuracy, win rate, and P/L from served signals.</p>
+      <a class="btn" href="/admin/performance">Open Performance Report</a>
+      <span class="muted" style="margin-left:8px">(auto-evaluates unevaluated logs)</span>
+    </div>
+  </div>
 </div>
 
-
-<div class="card">
-  <h3>Performance</h3>
-  <p class="muted">View last 24h accuracy, win rate, and P/L from served signals.</p>
-  <a class="btn" href="/admin/performance">Open Performance Report</a>
-  <span class="muted" style="margin-left:8px">(auto-evaluates unevaluated logs)</span>
-  
-</div>
-
-
-<div class="card">
+<div class="card" id="db-upload">
   <h3>SQLite DB (Download / Upload)</h3>
   <div class="row">
     <div class="col">

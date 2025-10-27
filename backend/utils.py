@@ -876,6 +876,24 @@ def get_live_indicators(pair: str, timeframe: str) -> Dict[str, Any]:
                 kl = fetch_klines_finnhub(pair, timeframe, limit=240)
     except Exception:
         kl = None
+    # TwelveData native 3m OHLCV for FX (if available)
+    if (not kl or len(kl) < 60) and cls == "forex" and timeframe == "3m":
+        try:
+            td = fetch_klines_twelvedata(pair, timeframe, limit=240)
+            if td and len(td) >= 60:
+                kl = td
+        except Exception:
+            pass
+    # Yahoo FX OHLCV fallback if no Finnhub klines (for FX)
+    if (not kl or len(kl) < 60) and cls == "forex":
+        try:
+            if timeframe == "5m":
+                kl = fetch_klines_yahoo_fx(pair, interval="5m", range_s="1d")
+            else:
+                # Treat 1m and 3m via 1m then resample
+                kl = fetch_klines_yahoo_fx(pair, interval="1m", range_s="2h")
+        except Exception:
+            kl = None
     if kl and len(kl) >= 60:
         if timeframe == "3m":
             try:
@@ -891,7 +909,7 @@ def get_live_indicators(pair: str, timeframe: str) -> Dict[str, Any]:
         return {"ok": True, **compute_indicators_ohlc(kl)}
     # Fallback: closes-only
     closes = None
-    for src in (fetch_ohlc_finnhub, fetch_ohlc_twelvedata, fetch_ohlc_alphavantage):
+    for src in (fetch_ohlc_finnhub, fetch_ohlc_twelvedata, fetch_ohlc_alphavantage, fetch_ohlc_yahoo_fx):
         try:
             closes = src(pair, timeframe, limit=200)
         except Exception:
@@ -965,6 +983,12 @@ def _mtf_from_base_1m(pair: str) -> Optional[Dict[str, Dict[str, Any]]]:
                 kl = fetch_klines_finnhub(pair, "1m", limit=240)
     except Exception:
         kl = None
+    # Yahoo FX OHLCV fallback for 1m if no Finnhub
+    if (not kl or len(kl) < 120) and cls == "forex":
+        try:
+            kl = fetch_klines_yahoo_fx(pair, interval="1m", range_s="2h")
+        except Exception:
+            kl = None
     if not kl or len(kl) < 120:
         return None
     # Build 1m, 3m, 5m frames
@@ -1106,12 +1130,15 @@ def generate_ensemble_signal(asset: Optional[str] = None, timeframe: str = "5m")
     assets = ["EUR/USD", "USD/JPY", "GBP/USD", "AUD/USD", "USD/CHF", "USD/CAD", "NZD/USD"]
     pair = asset or random.choice(assets)
     # Session filter (toggle via STRICT_SESSION_FILTER)
+    now_ist = datetime.now(ZoneInfo(os.getenv("TIMEZONE", "Asia/Kolkata")))
+    upd = now_ist.strftime("%H:%M:%S %Z")
     if os.getenv("STRICT_SESSION_FILTER", "1").strip() in ("1", "true", "True") and not _market_open_for_asset(pair):
         return (
             f"{pair} · TF: {timeframe}\n"
             f"⏳ Direction: NO-TRADE\n"
             f"💡 Confidence: 0/5\n"
             f"Reason: Session closed/illiquid.\n"
+            f"Updated: {upd}\n"
             f"⚠️ This is not financial advice."
         )
     # News risk filter
@@ -1121,6 +1148,7 @@ def generate_ensemble_signal(asset: Optional[str] = None, timeframe: str = "5m")
             f"⏳ Direction: NO-TRADE\n"
             f"💡 Confidence: 0/5\n"
             f"Reason: High-impact news window.\n"
+            f"Updated: {upd}\n"
             f"⚠️ This is not financial advice."
         )
     mtf = _fetch_mtf(pair)
@@ -1141,6 +1169,7 @@ def generate_ensemble_signal(asset: Optional[str] = None, timeframe: str = "5m")
                 f"💡 Confidence: {confidence}/5\n"
                 f"Reason: {reason_text}.\n"
                 f"Session: {sess_names} · Active window: {win_txt}\n"
+                f"Updated: {upd}\n"
                 f"⚠️ This is not financial advice."
             )
         # Absolute fallback
@@ -1156,6 +1185,7 @@ def generate_ensemble_signal(asset: Optional[str] = None, timeframe: str = "5m")
             f"💡 Confidence: {confidence}/5\n"
             f"Reason: {reason_text}.\n"
             f"Session: {sess_names} · Active window: {win_txt}\n"
+            f"Updated: {upd}\n"
             f"⚠️ This is not financial advice."
         )
     direction = agg["dir"]
@@ -1171,6 +1201,7 @@ def generate_ensemble_signal(asset: Optional[str] = None, timeframe: str = "5m")
         f"💡 Confidence: {confidence}/5\n"
         f"Reason: {reason_text}.\n"
         f"Session: {sess_names} · Active window: {win_txt}\n"
+        f"Updated: {upd}\n"
         f"⚠️ This is not financial advice."
     )
 
@@ -1320,6 +1351,60 @@ def fetch_ohlc_twelvedata(pair: str, timeframe: str, limit: int = 200):
     # API returns newest first
     closes = [float(v["close"]) for v in reversed(vals)]
     return closes[-limit:]
+
+def fetch_klines_twelvedata(pair: str, timeframe: str, limit: int = 240) -> Optional[List[list]]:
+    """Fetch OHLCV klines via TwelveData time_series (needs TWELVEDATA_API_KEY).
+    Returns list: [openTimeMs, open, high, low, close, volume, closeTimeMs]
+    """
+    key = os.getenv("TWELVEDATA_API_KEY", "").strip()
+    if not key:
+        return None
+    maps = _tf_maps(timeframe)["twelvedata"]
+    if timeframe not in maps:
+        return None
+    interval = maps[timeframe]
+    m = _classify_and_symbol_for_provider(pair, "twelvedata")
+    sym = m["symbol"] if m else pair
+    url = (
+        f"https://api.twelvedata.com/time_series?symbol={sym}&interval={interval}&outputsize={limit}&apikey={key}&format=JSON&dp=6&order=ASC"
+    )
+    try:
+        r = safe_request("GET", url, timeout=8)
+        if r.status_code != 200:
+            return None
+        j = r.json()
+        vals = j.get("values")
+        if not vals:
+            return None
+        # API often returns newest first when order not specified; we forced ASC
+        # Build klines list in ascending time
+        if timeframe == "1m":
+            sec = 60
+        elif timeframe == "3m":
+            sec = 180
+        elif timeframe == "5m":
+            sec = 300
+        else:
+            sec = 60
+        out = []
+        for v in vals:
+            ts_str = v.get("datetime")
+            try:
+                # TwelveData datetime is e.g. "2023-07-26 14:33:00"
+                dt = datetime.fromisoformat(ts_str)
+                ot_ms = int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
+            except Exception:
+                continue
+            o = float(v.get("open"))
+            h = float(v.get("high"))
+            l = float(v.get("low"))
+            c = float(v.get("close"))
+            vol = float(v.get("volume")) if v.get("volume") is not None else 0.0
+            ct_ms = ot_ms + sec * 1000
+            out.append([ot_ms, o, h, l, c, vol, ct_ms])
+        return out[-limit:] if out else None
+    except Exception:
+        return None
 
 
 def fetch_ohlc_alphavantage(pair: str, timeframe: str, limit: int = 200):

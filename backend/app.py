@@ -1312,12 +1312,20 @@ if bot:
 
     def _is_high_conf(pair: str) -> Optional[dict]:
         try:
-            mtf = utils._fetch_mtf(pair)
-            agg = utils._aggregate_scores(mtf)
+            # Allow broadcast-specific mode and min confidence via env
+            prev_mode = os.getenv("ENSEMBLE_MODE", "pro")
+            mode_b = os.getenv("ENSEMBLE_MODE_BROADCAST", prev_mode)
+            try:
+                os.environ["ENSEMBLE_MODE"] = mode_b
+                mtf = utils._fetch_mtf(pair)
+                agg = utils._aggregate_scores(mtf)
+            finally:
+                os.environ["ENSEMBLE_MODE"] = prev_mode
             if not agg or not agg.get("ok"):
                 return None
             conf = int(agg.get("confidence", 0))
-            if conf < SIGNAL_CONFIDENCE_MIN:
+            min_conf = int(os.getenv("BROADCAST_CONFIDENCE_MIN", str(SIGNAL_CONFIDENCE_MIN)))
+            if conf < min_conf:
                 return None
             # Extra gate: avoid if market closed
             if not utils._market_open_for_asset(pair):
@@ -1331,11 +1339,17 @@ if bot:
         emoji = "📈" if d == "UP" else ("📉" if d == "DOWN" else "⏳")
         conf = int(info.get("confidence", 0))
         reasons = ", ".join(info.get("reasons", [])[:3]) or ("MTF confluence" if d else "No-trade")
+        try:
+            now_ist = datetime.now(utils.ZoneInfo(os.getenv("TIMEZONE", "Asia/Kolkata")))
+            upd = now_ist.strftime("%H:%M:%S %Z")
+        except Exception:
+            upd = ""
         return (
             f"{pair}\n"
             f"{emoji} Direction: {d or 'NO-TRADE'}\n"
             f"💡 Confidence: {conf}/5\n"
             f"Reason: {reasons}.\n"
+            + (f"Updated: {upd}\n" if upd else "") +
             f"⚠️ This is not financial advice."
         )
 

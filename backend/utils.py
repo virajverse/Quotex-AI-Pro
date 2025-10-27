@@ -583,6 +583,13 @@ def get_entry_price(pair: str, timeframe: str) -> Optional[float]:
             return float(closes[-1])
     except Exception:
         pass
+    # 4b) Yahoo Finance (1m/5m) near-real-time without key
+    try:
+        closes = fetch_ohlc_yahoo_fx(pair, normalized_tf, limit=2)
+        if closes:
+            return float(closes[-1])
+    except Exception:
+        pass
     # 5) Free FX spot fallback (no key required)
     if cls == "forex":
         try:
@@ -634,7 +641,88 @@ def get_close_at_time(pair: str, timeframe: str, entry_iso: str) -> Optional[flo
                         return float(k[4])
             except Exception:
                 continue
+    # Yahoo fallback (no key)
+    try:
+        kl = fetch_klines_yahoo_fx(pair, interval="1m", range_s="2h")
+        if kl:
+            for k in kl:
+                ot, ct = int(k[0]), int(k[6])
+                if ot <= entry_ms < ct or entry_ms <= ot:
+                    return float(k[4])
+    except Exception:
+        pass
     return None
+
+def fetch_ohlc_yahoo_fx(pair: str, timeframe: str, limit: int = 200) -> Optional[List[float]]:
+    """Fetch near-real-time closes for FX via Yahoo Finance chart API (no key).
+    timeframe: "1m", "3m", "5m" (3m maps to 1m here).
+    Returns list of closes.
+    """
+    up = (pair or "").upper().replace("/", "") + "=X"
+    if timeframe == "3m":
+        interval = "1m"  # best-effort mapping
+        range_s = "2h"
+    elif timeframe == "5m":
+        interval = "5m"
+        range_s = "1d"
+    else:
+        interval = "1m"
+        range_s = "2h"
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{up}?interval={interval}&range={range_s}"
+    r = safe_request("GET", url, timeout=8)
+    if not r or r.status_code != 200:
+        return None
+    j = r.json() or {}
+    res = ((j.get("chart") or {}).get("result") or [])
+    if not res:
+        return None
+    r0 = res[0]
+    q = (((r0.get("indicators") or {}).get("quote") or []) or [{}])[0]
+    closes = q.get("close") or []
+    # Filter None values and keep last N
+    vals = [float(x) for x in closes if x is not None]
+    return vals[-min(len(vals), max(1, limit)):] if vals else None
+
+def fetch_klines_yahoo_fx(pair: str, interval: str = "1m", range_s: str = "2h") -> Optional[List[list]]:
+    """Fetch OHLCV klines from Yahoo Finance chart API (no key).
+    Returns list: [openTimeMs, open, high, low, close, volume, closeTimeMs]
+    """
+    up = (pair or "").upper().replace("/", "") + "=X"
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{up}?interval={interval}&range={range_s}"
+    r = safe_request("GET", url, timeout=8)
+    if not r or r.status_code != 200:
+        return None
+    j = r.json() or {}
+    res = ((j.get("chart") or {}).get("result") or [])
+    if not res:
+        return None
+    r0 = res[0]
+    ts = r0.get("timestamp") or []
+    ind = (r0.get("indicators") or {})
+    q = ((ind.get("quote") or []) or [{}])[0]
+    o = q.get("open") or []
+    h = q.get("high") or []
+    l = q.get("low") or []
+    c = q.get("close") or []
+    v = q.get("volume") or []
+    if not ts or not c:
+        return None
+    sec = 60 if interval in ("1m", "2m", "3m") else 300
+    out: List[list] = []
+    for i in range(min(len(ts), len(c))):
+        t = int(ts[i])
+        ot = t * 1000
+        ct = (t + sec) * 1000
+        try:
+            oo = float(o[i]) if i < len(o) and o[i] is not None else float(c[i])
+            hh = float(h[i]) if i < len(h) and h[i] is not None else float(c[i])
+            ll = float(l[i]) if i < len(l) and l[i] is not None else float(c[i])
+            cc = float(c[i])
+            vv = float(v[i]) if i < len(v) and v[i] is not None else 0.0
+        except Exception:
+            continue
+        out.append([ot, oo, hh, ll, cc, vv, ct])
+    return out[-min(len(out), 1000):] if out else None
 
 def _eval_option_a_crypto(pair: str, timeframe: str, entry_iso: str, direction: str) -> Optional[Dict[str, Any]]:
     sym = _binance_symbol(pair)

@@ -146,6 +146,25 @@ if bot:
             pass
         return False
 
+if BOT_TOKEN:
+    @app.post(f"/bot/{BOT_TOKEN}")
+    def telegram_webhook():
+        try:
+            payload = request.get_data().decode("utf-8")
+            data = json.loads(payload or "{}")
+        except Exception:
+            return ("", 400)
+        try:
+            update = types.Update.de_json(data)
+            if bot:
+                bot.process_new_updates([update])
+        except Exception:
+            try:
+                logger.exception("webhook update failed")
+            except Exception:
+                pass
+        return ("OK", 200)
+
 @app.get("/favicon.ico")
 @app.get("/favicon.png")
 @app.get("/apple-touch-icon.png")

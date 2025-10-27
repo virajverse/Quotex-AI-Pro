@@ -7,8 +7,10 @@
       <div class="col">
         <label>Message</label>
         <textarea name="text" rows="7" placeholder="Your broadcast message (optional if sending image only)..."></textarea>
-        <label style="display:flex; gap:8px; align-items:center; margin-top:8px">
-          <input type="checkbox" name="premium_only" value="1"> Premium users only
+        <label class="toggle-row" style="margin-top:8px">
+          <input type="checkbox" name="premium_only" value="1">
+          <span class="switch"></span>
+          <span>Premium users only</span>
         </label>
         <div style="margin-top:10px">
           <label>Attach JPG (optional)</label>
@@ -21,21 +23,21 @@
       </div>
       <div class="col">
         <label>Telegram Buttons Visibility</label>
-        <div class="row" style="gap:8px">
-          {% set T = toggles or {} %}
-          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_SIGNUP" value="1" {% if T.get('UI_HIDE_SIGNUP') %}checked{% endif %}> Hide SIGN UP</label>
-          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_LOGIN" value="1" {% if T.get('UI_HIDE_LOGIN') %}checked{% endif %}> Hide LOGIN</label>
-          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_PROFILE" value="1" {% if T.get('UI_HIDE_PROFILE') %}checked{% endif %}> Hide PROFILE</label>
-          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_GET_STARTED" value="1" {% if T.get('UI_HIDE_GET_STARTED') %}checked{% endif %}> Hide GET STARTED</label>
-          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_HOW" value="1" {% if T.get('UI_HIDE_HOW') %}checked{% endif %}> Hide HOW IT WORKS</label>
-          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_LIVE_SIGNALS" value="1" {% if T.get('UI_HIDE_LIVE_SIGNALS') %}checked{% endif %}> Hide LIVE SIGNALS</label>
-          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_TOOLS" value="1" {% if T.get('UI_HIDE_TOOLS') %}checked{% endif %}> Hide ANALYSIS TOOLS</label>
-          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_PERF24H" value="1" {% if T.get('UI_HIDE_PERF24H') %}checked{% endif %}> Hide 24H VIP PROFIT</label>
-          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_HOURS" value="1" {% if T.get('UI_HIDE_HOURS') %}checked{% endif %}> Hide MARKET HOURS</label>
-          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_PLAN" value="1" {% if T.get('UI_HIDE_PLAN') %}checked{% endif %}> Hide PLAN STATUS</label>
-          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_SUPPORT" value="1" {% if T.get('UI_HIDE_SUPPORT') %}checked{% endif %}> Hide SUPPORT</label>
-          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_DISCLAIMER" value="1" {% if T.get('UI_HIDE_DISCLAIMER') %}checked{% endif %}> Hide RISK DISCLAIMER</label>
-          <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="UI_HIDE_SELECT_PLAN" value="1" {% if T.get('UI_HIDE_SELECT_PLAN') %}checked{% endif %}> Hide SELECT A PLAN (reply)</label>
+        {% set T = toggles or {} %}
+        <div class="toggle-grid" style="margin-top:8px">
+          <label class="toggle-row"><input type="checkbox" name="UI_HIDE_SIGNUP" value="1" {% if T.get('UI_HIDE_SIGNUP') %}checked{% endif %}><span class="switch"></span><span>Hide SIGN UP</span></label>
+          <label class="toggle-row"><input type="checkbox" name="UI_HIDE_LOGIN" value="1" {% if T.get('UI_HIDE_LOGIN') %}checked{% endif %}><span class="switch"></span><span>Hide LOGIN</span></label>
+          <label class="toggle-row"><input type="checkbox" name="UI_HIDE_PROFILE" value="1" {% if T.get('UI_HIDE_PROFILE') %}checked{% endif %}><span class="switch"></span><span>Hide PROFILE</span></label>
+          <label class="toggle-row"><input type="checkbox" name="UI_HIDE_GET_STARTED" value="1" {% if T.get('UI_HIDE_GET_STARTED') %}checked{% endif %}><span class="switch"></span><span>Hide GET STARTED</span></label>
+          <label class="toggle-row"><input type="checkbox" name="UI_HIDE_HOW" value="1" {% if T.get('UI_HIDE_HOW') %}checked{% endif %}><span class="switch"></span><span>Hide HOW IT WORKS</span></label>
+          <label class="toggle-row"><input type="checkbox" name="UI_HIDE_LIVE_SIGNALS" value="1" {% if T.get('UI_HIDE_LIVE_SIGNALS') %}checked{% endif %}><span class="switch"></span><span>Hide LIVE SIGNALS</span></label>
+          <label class="toggle-row"><input type="checkbox" name="UI_HIDE_TOOLS" value="1" {% if T.get('UI_HIDE_TOOLS') %}checked{% endif %}><span class="switch"></span><span>Hide ANALYSIS TOOLS</span></label>
+          <label class="toggle-row"><input type="checkbox" name="UI_HIDE_PERF24H" value="1" {% if T.get('UI_HIDE_PERF24H') %}checked{% endif %}><span class="switch"></span><span>Hide 24H VIP PROFIT</span></label>
+          <label class="toggle-row"><input type="checkbox" name="UI_HIDE_HOURS" value="1" {% if T.get('UI_HIDE_HOURS') %}checked{% endif %}><span class="switch"></span><span>Hide MARKET HOURS</span></label>
+          <label class="toggle-row"><input type="checkbox" name="UI_HIDE_PLAN" value="1" {% if T.get('UI_HIDE_PLAN') %}checked{% endif %}><span class="switch"></span><span>Hide PLAN STATUS</span></label>
+          <label class="toggle-row"><input type="checkbox" name="UI_HIDE_SUPPORT" value="1" {% if T.get('UI_HIDE_SUPPORT') %}checked{% endif %}><span class="switch"></span><span>Hide SUPPORT</span></label>
+          <label class="toggle-row"><input type="checkbox" name="UI_HIDE_DISCLAIMER" value="1" {% if T.get('UI_HIDE_DISCLAIMER') %}checked{% endif %}><span class="switch"></span><span>Hide RISK DISCLAIMER</span></label>
+          <label class="toggle-row"><input type="checkbox" name="UI_HIDE_SELECT_PLAN" value="1" {% if T.get('UI_HIDE_SELECT_PLAN') %}checked{% endif %}><span class="switch"></span><span>Hide SELECT A PLAN (reply)</span></label>
         </div>
         <div class="muted" style="margin-top:8px">Submit with empty message/image to save only visibility settings.</div>
       </div>

@@ -70,6 +70,8 @@ BROADCAST_INTERVAL_SEC = int(os.getenv("BROADCAST_INTERVAL_SEC", "120"))
 BROADCAST_ASSETS = [p.strip() for p in (os.getenv("BROADCAST_ASSETS", "EUR/USD,GBP/JPY,GBP/USD,EUR/GBP,USD/JPY").split(",")) if p.strip()]
 EVALUATION_INTERVAL_SEC = int(os.getenv("EVALUATION_INTERVAL_SEC", "60"))
 EVALUATION_ENABLED = os.getenv("EVALUATION_ENABLED", "1").strip() in ("1", "true", "True")
+EVALUATION_NOTIFY = os.getenv("EVALUATION_NOTIFY", "1").strip() in ("1", "true", "True")
+EVALUATION_NOTIFY_CHANNEL = os.getenv("EVALUATION_NOTIFY_CHANNEL", "0").strip() in ("1", "true", "True")
 
 # Session secret key for Admin Panel
 if SECRET_KEY:
@@ -1393,6 +1395,60 @@ if bot:
             except Exception:
                 time.sleep(60)
 
+    def _notify_evaluations():
+        try:
+            last_id = int(db.get_setting("eval_notified_last_id") or 0)
+        except Exception:
+            last_id = 0
+        try:
+            rows = db.list_all_signal_logs_full(limit=1000)
+        except Exception:
+            rows = []
+        max_id = last_id
+        for r in rows or []:
+            rid = int(r.get("id") or 0)
+            if rid <= last_id:
+                continue
+            outcome = (r.get("outcome") or "").upper()
+            if not outcome:
+                continue
+            pnl = r.get("pnl_pct")
+            pair = r.get("pair") or "-"
+            tf = r.get("timeframe") or "-"
+            entry_price = r.get("entry_price")
+            exit_price = r.get("exit_price")
+            exit_time = r.get("exit_time") or r.get("evaluated_at")
+            def _fmt(v):
+                if v is None:
+                    return "-"
+                v = float(v)
+                if v >= 100: return f"{v:.2f}"
+                if v >= 1: return f"{v:.4f}"
+                return f"{v:.6f}"
+            msg = (
+                f"{pair} · TF: {tf}\n"
+                f"Result: {outcome} ({float(pnl):+0.2f}% )\n" if pnl is not None else f"Result: {outcome}\n"
+            )
+            msg += f"Entry: {_fmt(entry_price)} → Exit: {_fmt(exit_price)}\n"
+            if exit_time:
+                msg += f"Closed: {exit_time}\n"
+            try:
+                if EVALUATION_NOTIFY:
+                    tg = r.get("telegram_id")
+                    if bot and tg:
+                        bot.send_message(int(tg), msg)
+                if EVALUATION_NOTIFY_CHANNEL and SIGNAL_CHANNEL:
+                    bot.send_message(_broadcast_target_id(), msg)
+            except Exception:
+                pass
+            if rid > max_id:
+                max_id = rid
+        if max_id > last_id:
+            try:
+                db.set_setting("eval_notified_last_id", str(max_id))
+            except Exception:
+                pass
+
     def _evaluation_daemon():
         if not bot:
             return
@@ -1401,6 +1457,7 @@ if bot:
         while True:
             try:
                 utils.evaluate_pending_signals(db)
+                _notify_evaluations()
             except Exception:
                 pass
             time.sleep(max(15, int(os.getenv("EVALUATION_INTERVAL_SEC", str(EVALUATION_INTERVAL_SEC)))))

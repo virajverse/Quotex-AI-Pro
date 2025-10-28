@@ -374,6 +374,22 @@ def get_entry_price(pair: str, timeframe: str) -> Optional[float]:
         except Exception:
             pass
         return None
+    # Non-crypto: try Yahoo klines first for freshest minute close
+    if _classify_asset(pair) == "forex":
+        try:
+            if timeframe == "5m":
+                ykl = fetch_klines_yahoo_fx(pair, interval="5m", range_s="1d")
+            else:
+                ykl = fetch_klines_yahoo_fx(pair, interval="1m", range_s="1h")
+            if ykl and len(ykl) > 0:
+                last = ykl[-1]
+                now_ms = int(time_module.time() * 1000)
+                sec = _seconds_for_tf(timeframe)
+                # Accept only if bar closed recently (<= 3 bars old)
+                if now_ms - int(last[6]) <= max(1, 3 * sec) * 1000:
+                    return float(last[4])
+        except Exception:
+            pass
     # Non-crypto: attempt Finnhub/Twelve/AlphaVantage closes (last close as proxy)
     normalized_tf = "1m" if timeframe == "3m" else timeframe
     # 1) Finnhub OHLC (normalized tf)
